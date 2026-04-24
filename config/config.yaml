@@ -1,0 +1,223 @@
+# Data Ingestion Configuration for ML Trading TFM
+
+# yfinance data sources
+data_sources:
+  spy:
+    ticker: "SPY"
+    name: "S&P 500 ETF"
+  uso:
+    ticker: "USO"
+    name: "WTI Oil ETF"
+    start_date: "2006-04-10"  # USO started trading on this date
+
+# FRED economic data series
+fred_series:
+  vix:
+    series_id: "VIXCLS"
+    name: "VIX Volatility Index"
+  yield_10y:
+    series_id: "DGS10"
+    name: "10-Year Treasury Yield"
+  yield_2y:
+    series_id: "DGS2"
+    name: "2-Year Treasury Yield"
+  yield_1y:
+    series_id: "DGS1"
+    name: "1-Year Treasury Yield"
+  corp_oas:
+    series_id: "BAMLC0A0CM"
+    name: "Corporate IG OAS"
+  hy_oas:
+    series_id: "BAMLH0A0HYM2"
+    name: "High Yield OAS"
+  sentiment:
+    series_id: "UMCSENT"
+    name: "Consumer Sentiment"
+  real_gdp:
+    series_id: "GDPC1"
+    name: "Real GDP"
+  oil:
+    series_id: "DCOILWTICO"
+    name: "WTI Oil Price"
+  inflacion:
+    series_id: "CPIAUCSL"
+    name: "CPI Inflation"
+  leading:
+    series_id: "USSLIND"
+    name: "Leading Indicators"
+  empleo:
+    series_id: "UNRATE"
+    name: "Unemployment Rate"
+  weekjobclaims:
+    series_id: "ICSA"
+    name: "Weekly Jobless Claims"
+  retail_sales:
+    series_id: "RSXFS"
+    name: "Retail Sales"
+  us_asset_balance:
+    series_id: "WALCL"
+    name: "Fed Balance Sheet"
+
+# Ingestion parameters
+ingestion:
+  start_date: "2004-01-01"
+  end_date: "2024-12-31"     # Fixed for reproducibility
+  frequency: "1d"
+  raw_data_path: "data/raw/"
+  processed_data_path: "data/processed/"
+  hdf5_file: "data/processed/assets.h5"
+
+  # HDF5 keys
+  hdf5_keys:
+    raw_data: "data_raw"
+    engineered_features: "engineered_features"
+
+  # Data alignment
+  alignment:
+    method: "inner"  # inner join between yfinance and FRED trading dates
+
+  # FRED transformations
+  fred_transformations:
+    add_diff: true        # Add _diff columns (first difference)
+    add_pct_change: true  # Add _chg columns (percentage change)
+
+# Feature Engineering Configuration
+features:
+  # Technical indicators
+  # All periods follow standard parameterisations from the literature:
+  # RSI and ATR use Wilder's 14-period definition,
+  # MACD uses Appel's 12/26/9 parameterisation,
+  # Bollinger Bands use the standard 20-period SMA ± 2 std definition.
+  # Volatility uses EWM(span=20).std() per tutor recommendation,
+  # consistent with the triple barrier labeling.
+  technical:
+    momentum_periods: [1, 5, 21]
+    volatility_period: 20
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bollinger_period: 20
+    bollinger_std: 2
+    atr_period: 14
+    volume_ma_period: 20
+
+  # Triple barrier labeling
+  # Parameters follow tutor recommendation:
+  # k=1.0 and max_holding=8 days yield a time barrier hit rate below 5%,
+  # meaning price barriers drive labeling in the vast majority of cases.
+  # Volatility is computed as EWM(span=20).std() of daily returns.
+  triple_barrier:
+    max_holding_period: 8   # Maximum holding period in days (time barrier)
+    vol_multiplier: 1.0     # Volatility multiplier k for barrier width
+    min_ret: 0.0            # Minimum return threshold (0 = purely volatility-based)
+
+# Model Configuration
+models:
+  # Walk-forward cross-validation
+  # Expanding window with 8 folds over 2008-2020.
+  # train_start is set to 2008 to allow a 4-year warmup period
+  # for technical indicators (longest lookback: MACD slow=26 days).
+  # OOS period 2020-2024 is held out and never used during training.
+  walk_forward:
+    train_start: "2008-01-01"
+    train_end: "2020-01-01"
+    test_start: "2020-01-01"
+    test_end: "2024-12-31"
+    n_splits: 8
+    val_window_years: 1
+
+  # Columns excluded from the feature matrix X.
+  # OHLCV columns are raw price data and must not be used as features.
+  # label and label_binary are the target variables.
+  # days_to_barrier is a labeling artefact, not a predictive feature.
+  # 
+  # FRED EXCLUSIONS FOR BASELINE (Iteration 1):
+  # Per supervisor guidance, Iteration 1 uses ONLY technical indicators
+  # and daily market variables (vix, oil). All monthly FRED macroeconomic
+  # series are excluded from the baseline.
+  # 
+  # Note: Regime columns are NOT excluded here. They are added explicitly
+  # in run_walk_forward_regime.py for iteration 2, and the walk-forward
+  # module will naturally exclude them in iteration 1 since they don't exist yet.
+  exclude_from_features:
+    - "Close"
+    - "High"
+    - "Low"
+    - "Open"
+    - "Volume"
+    - "label"
+    - "label_binary"
+    - "days_to_barrier"
+    # Monthly FRED series (excluded from baseline)
+    - "yield_10y"
+    - "yield_10y_diff"
+    - "yield_10y_chg"
+    - "yield_2y"
+    - "yield_2y_diff"
+    - "yield_2y_chg"
+    - "yield_1y"
+    - "yield_1y_diff"
+    - "yield_1y_chg"
+    - "corp_oas"
+    - "corp_oas_diff"
+    - "corp_oas_chg"
+    - "hy_oas"
+    - "hy_oas_diff"
+    - "hy_oas_chg"
+    - "sentiment"
+    - "sentiment_diff"
+    - "sentiment_chg"
+    - "real_gdp"
+    - "real_gdp_diff"
+    - "real_gdp_chg"
+    - "inflacion"
+    - "inflacion_diff"
+    - "inflacion_chg"
+    - "leading"
+    - "leading_diff"
+    - "leading_chg"
+    - "empleo"
+    - "empleo_diff"
+    - "empleo_chg"
+    - "weekjobclaims"
+    - "weekjobclaims_diff"
+    - "weekjobclaims_chg"
+    - "retail_sales"
+    - "retail_sales_diff"
+    - "retail_sales_chg"
+    - "us_asset_balance"
+    - "us_asset_balance_diff"
+    - "us_asset_balance_chg"
+
+  # LightGBM configuration
+  lightgbm:
+    n_estimators: 500
+    learning_rate: 0.05
+    max_depth: 6
+    num_leaves: 31
+    min_child_samples: 20
+    subsample: 0.8
+    colsample_bytree: 0.8
+    class_weight: "balanced"
+    random_state: 42
+
+  # Explainable Boosting Machine configuration
+  ebm:
+    max_bins: 256
+    max_interaction_bins: 32
+    interactions: 10
+    learning_rate: 0.01
+    max_rounds: 5000
+    min_samples_leaf: 2
+    random_state: 42
+
+  # RuleFit configuration
+  # Excluded from walk-forward validation due to scalability constraints.
+  # Applied separately on a representative training sample for post-hoc
+  # rule extraction and interpretability analysis.
+  rulefit:
+    enabled: false
+    tree_size: 4
+    max_rules: 500
+    random_state: 42
