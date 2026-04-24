@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Market Regime Detection and Knowledge Distillation for Financial Time Series
 
 This repository contains the implementation of a Master's thesis on supervised machine learning for binary classification of financial time series (SPY and USO ETFs) using the Triple Barrier Method for labeling, with two iterations: a baseline model and an enhanced version incorporating GMM-based market regime detection features.
@@ -192,3 +193,6 @@ This code is provided for academic purposes as part of a Master's thesis.
 ## Contact
 
 For questions about this implementation, please refer to the thesis document or contact the author through the academic institution.
+=======
+# TFM
+>>>>>>> 6729467df735d15b743653273db9655281285bd3
