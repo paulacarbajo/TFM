@@ -149,6 +149,7 @@ models:
     - "label"
     - "label_binary"
     - "days_to_barrier"
+    - "ret_1d_forward"  # Used for backtesting only, not as a feature
     # Monthly FRED series (excluded from baseline)
     - "yield_10y"
     - "yield_10y_diff"

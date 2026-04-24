@@ -5,6 +5,10 @@ Evaluates trained models on the out-of-sample (OOS) period 2020-2024.
 Uses the last walk-forward fold's models, which were trained on the largest
 available training set (2008-2019), to generate predictions on unseen data.
 
+Trading returns are calculated using ret_1d_forward (next day's realized return)
+to avoid look-ahead bias. This ensures strategy returns reflect what would
+actually be achieved in live trading.
+
 Results are computed per ticker (SPY and USO independently) and compared
 against a buy-and-hold benchmark.
 """
@@ -113,7 +117,8 @@ class Backtester:
         Win rate is the fraction of days with positive strategy return.
 
         Args:
-            returns: Series of actual daily returns (ret_1d)
+            returns: Series of forward returns (ret_1d_forward) - the return
+                    that would be realized if entering position today
             signals: Series of predicted signals in {-1, 1}
 
         Returns:
@@ -309,7 +314,17 @@ class Backtester:
 
         X_oos = oos_data[feature_names].copy()
         y_oos = oos_data['label_binary'].copy()
-        returns_oos = oos_data['ret_1d'].copy()
+        returns_oos = oos_data['ret_1d_forward'].copy()
+        
+        # Drop rows where ret_1d_forward is NaN (last row per ticker)
+        valid_mask = ~returns_oos.isna()
+        n_dropped = (~valid_mask).sum()
+        if n_dropped > 0:
+            logger.warning(f"Dropping {n_dropped} rows with NaN ret_1d_forward (last row per ticker)")
+            X_oos = X_oos[valid_mask]
+            y_oos = y_oos[valid_mask]
+            returns_oos = returns_oos[valid_mask]
+            oos_data = oos_data[valid_mask]
 
         tickers = oos_data.index.get_level_values('ticker').unique().tolist()
         logger.info(f"Tickers: {tickers}")
@@ -320,6 +335,10 @@ class Backtester:
             logger.info(f"\nEvaluating on {ticker}...")
 
             ticker_mask = oos_data.index.get_level_values('ticker') == ticker
+            
+            # Keep date index for proper alignment in post-processing
+            ticker_dates = oos_data[ticker_mask].index.get_level_values('date')
+            
             X_ticker = X_oos[ticker_mask].reset_index(drop=True)
             y_ticker = y_oos[ticker_mask].reset_index(drop=True)
             returns_ticker = returns_oos[ticker_mask].reset_index(drop=True)
@@ -338,9 +357,13 @@ class Backtester:
                     threshold=threshold
                 )
                 if result is not None:
+                    # Store dates for proper alignment in post-processing
+                    result['dates'] = ticker_dates.tolist()
                     results.append(result)
 
             benchmark_result = self._evaluate_benchmark(returns_ticker, ticker)
+            # Store dates for benchmark too
+            benchmark_result['dates'] = ticker_dates.tolist()
             results.append(benchmark_result)
 
         logger.info("")

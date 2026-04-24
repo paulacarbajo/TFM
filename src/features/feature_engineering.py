@@ -82,12 +82,18 @@ class FeatureEngineer:
     def calculate_returns(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Calculate momentum returns for different periods.
+        
+        Also calculates ret_1d_forward for backtesting. This column represents
+        the return that would be realized if entering a position at today's close
+        and exiting at tomorrow's close. It is used exclusively for computing
+        strategy returns in backtesting and must never be used as a model feature
+        (to avoid look-ahead bias).
 
         Args:
             data: DataFrame with Close prices (single ticker)
 
         Returns:
-            DataFrame with ret_1d, ret_5d, ret_21d columns added
+            DataFrame with ret_1d, ret_5d, ret_21d, ret_1d_forward columns added
         """
         result = data.copy()
 
@@ -95,6 +101,11 @@ class FeatureEngineer:
             col_name = f'ret_{period}d'
             result[col_name] = result['Close'].pct_change(period)
             logger.debug(f"Calculated {col_name}")
+
+        # Calculate forward return for backtesting (next day's realized return)
+        # This is shift(-1) of ret_1d, representing tomorrow's return
+        result['ret_1d_forward'] = result['ret_1d'].shift(-1)
+        logger.debug("Calculated ret_1d_forward (next day's return for backtesting)")
 
         return result
 

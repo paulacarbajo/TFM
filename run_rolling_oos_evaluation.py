@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rolling Walk-Forward Evaluation on OOS Period (2020-2024) - FIXED VERSION
+Rolling Walk-Forward Evaluation on OOS Period (2020-2024)
 
 This script implements a rolling walk-forward approach where the model is
 retrained each year on expanding data:
@@ -9,11 +9,8 @@ retrained each year on expanding data:
 - Fold 3: Train 2008-2022, predict 2023
 - Fold 4: Train 2008-2023, predict 2024
 
-FIXES APPLIED:
-- Uses train_data.columns instead of data.columns for feature selection
-- Explicitly excludes all label-related columns
-- Adds assertions to verify feature count (23 for baseline, 27 with regime)
-- Uses exact same 23 features as defined in walk_forward.py TECHNICAL_FEATURES
+This provides a more realistic evaluation than using a single model trained
+on 2008-2019 data, as it allows the model to adapt to changing market conditions.
 """
 
 import warnings
@@ -332,10 +329,9 @@ def main():
     )
     
     logger.info("=" * 80)
-    logger.info("ROLLING WALK-FORWARD EVALUATION: OOS PERIOD 2020-2024 (FIXED)")
+    logger.info("ROLLING WALK-FORWARD EVALUATION: OOS PERIOD 2020-2024")
     logger.info("=" * 80)
     logger.info("Retraining models each year on expanding window")
-    logger.info("FIXES: Correct feature selection, no data leakage")
     logger.info("=" * 80)
     
     # Load config
@@ -416,7 +412,7 @@ def main():
     output_dir = Path('data/processed/rolling_oos')
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_path = output_dir / 'rolling_oos_results_fixed.pkl'
+    output_path = output_dir / 'rolling_oos_results.pkl'
     with open(output_path, 'wb') as f:
         pickle.dump(all_results, f)
     
@@ -424,7 +420,7 @@ def main():
     
     # Print summary
     print("\n" + "=" * 80)
-    print("ROLLING OOS RESULTS SUMMARY (2020-2024) - FIXED VERSION")
+    print("ROLLING OOS RESULTS SUMMARY (2020-2024)")
     print("=" * 80)
     
     for iteration in [1, 2]:
@@ -450,11 +446,11 @@ def main():
     print("=" * 80)
     
     try:
-        # Load fixed-model results
-        with open('data/processed/backtest_results_longonly_corrected.pkl', 'rb') as f:
+        # Load single-model results for comparison
+        with open('data/processed/backtest_results_longonly.pkl', 'rb') as f:
             fixed_results = pickle.load(f)
         
-        print("\nITERATION 1 (BASELINE) - Long-Only Strategy:")
+        print("\nBaseline - Long-Only Strategy:")
         print("-" * 80)
         
         for ticker in ['SPY', 'USO']:
@@ -464,24 +460,24 @@ def main():
             rolling_lgbm = all_results['iteration_1']['aggregated'][ticker]['lightgbm']
             rolling_ebm = all_results['iteration_1']['aggregated'][ticker]['ebm']
             
-            # Fixed results
-            fixed_lgbm = next(r for r in fixed_results['iteration_1'] 
+            # Single-model results
+            single_lgbm = next(r for r in fixed_results['iteration_1'] 
                             if r['ticker'] == ticker and r['model_name'] == 'lightgbm')
-            fixed_ebm = next(r for r in fixed_results['iteration_1'] 
+            single_ebm = next(r for r in fixed_results['iteration_1'] 
                            if r['ticker'] == ticker and r['model_name'] == 'ebm')
             
             print(f"  LightGBM:")
-            print(f"    Rolling:  Return {rolling_lgbm['trading']['total_return']:>8.2%}, Sharpe {rolling_lgbm['trading']['sharpe']:>6.2f}")
-            print(f"    Fixed:    Return {fixed_lgbm['metrics']['total_return']:>8.2%}, Sharpe {fixed_lgbm['metrics']['sharpe']:>6.2f}")
+            print(f"    Rolling:      Return {rolling_lgbm['trading']['total_return']:>8.2%}, Sharpe {rolling_lgbm['trading']['sharpe']:>6.2f}")
+            print(f"    Single-model: Return {single_lgbm['metrics']['total_return']:>8.2%}, Sharpe {single_lgbm['metrics']['sharpe']:>6.2f}")
             
             print(f"  EBM:")
-            print(f"    Rolling:  Return {rolling_ebm['trading']['total_return']:>8.2%}, Sharpe {rolling_ebm['trading']['sharpe']:>6.2f}")
-            print(f"    Fixed:    Return {fixed_ebm['metrics']['total_return']:>8.2%}, Sharpe {fixed_ebm['metrics']['sharpe']:>6.2f}")
+            print(f"    Rolling:      Return {rolling_ebm['trading']['total_return']:>8.2%}, Sharpe {rolling_ebm['trading']['sharpe']:>6.2f}")
+            print(f"    Single-model: Return {single_ebm['metrics']['total_return']:>8.2%}, Sharpe {single_ebm['metrics']['sharpe']:>6.2f}")
         
         logger.info("\nComparison complete")
         
     except FileNotFoundError:
-        logger.warning("Could not load fixed-model results for comparison")
+        logger.warning("Could not load single-model results for comparison")
     
     logger.info(f"\n{'=' * 80}")
     logger.info("ROLLING OOS EVALUATION COMPLETE")

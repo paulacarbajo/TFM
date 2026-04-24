@@ -41,9 +41,14 @@ def calculate_long_only_metrics(predictions, returns, labels):
     cumulative_returns = (1 + strategy_returns).cumprod()
     total_return = cumulative_returns.iloc[-1] - 1
     
-    # Sharpe ratio (annualized, 252 trading days)
-    if strategy_returns.std() > 0:
-        sharpe = (strategy_returns.mean() / strategy_returns.std()) * np.sqrt(252)
+    # Calculate Sharpe only on active trading days (positions == 1)
+    active_returns = strategy_returns[positions == 1]
+    
+    if len(active_returns) > 0 and active_returns.std() > 0:
+        # Annualize using fraction of days actively trading
+        active_fraction = len(active_returns) / len(strategy_returns)
+        trading_days_per_year = 252 * active_fraction
+        sharpe = (active_returns.mean() / active_returns.std()) * np.sqrt(trading_days_per_year)
     else:
         sharpe = 0.0
     
@@ -88,17 +93,14 @@ def run_long_only_backtest(iteration_name, results_file):
     
     # Load price data for returns
     with pd.HDFStore('data/processed/assets.h5', 'r') as store:
-        # Check available keys
         keys = store.keys()
         logger.info(f"Available keys in HDF5: {keys}")
         
-        # Use the correct key (likely 'df' or similar)
         if '/df' in keys:
             df = store['df']
         elif 'df' in keys:
             df = store['df']
         else:
-            # Use first available key
             df = store[keys[0]]
     
     # Filter to OOS period
@@ -116,18 +118,65 @@ def run_long_only_backtest(iteration_name, results_file):
         
         logger.info(f"\nProcessing {model_name.upper()} - {ticker}")
         
-        # Get predictions and returns for this ticker
-        ticker_data = df_oos.loc[ticker]
-        predictions = item['predictions']
+        # Get ticker data for OOS period
+        ticker_data = df_oos.loc[ticker].copy()
         
-        # Get returns (next day return)
-        returns = ticker_data['ret_1d'].values[:len(predictions)]
-        labels = ticker_data['label'].values[:len(predictions)]
+        # Use date-based alignment for proper data matching
+        predictions = item['predictions']
+        prediction_dates = item.get('dates', None)
+        
+        if prediction_dates is None:
+            logger.error(
+                f"  No dates found in backtest results for {ticker}. "
+                f"Please re-run run_backtest.py to regenerate results with dates."
+            )
+            continue
+        
+        # Convert to pandas DatetimeIndex for alignment
+        prediction_dates = pd.DatetimeIndex(prediction_dates)
+        
+        # Align ticker data with prediction dates using .loc
+        ticker_data_aligned = ticker_data.loc[prediction_dates].copy()
+        
+        # Verify alignment
+        if len(ticker_data_aligned) != len(predictions):
+            logger.warning(
+                f"  Alignment mismatch: {len(ticker_data_aligned)} data rows vs "
+                f"{len(predictions)} predictions. Skipping."
+            )
+            continue
+        
+        # Use ret_1d_forward for trading returns (next day's realized return)
+        if 'ret_1d_forward' not in ticker_data_aligned.columns:
+            logger.error(
+                f"  ret_1d_forward column not found for {ticker}. "
+                f"Please regenerate features with main.py"
+            )
+            continue
+        
+        returns = ticker_data_aligned['ret_1d_forward']
+        labels = ticker_data_aligned['label']
+        
+        # Drop NaN values in ret_1d_forward (last row per ticker)
+        valid_mask = ~returns.isna()
+        n_nan = (~valid_mask).sum()
+        if n_nan > 0:
+            logger.info(f"  Dropping {n_nan} NaN values in ret_1d_forward")
+            predictions = predictions[valid_mask.values]
+            returns = returns[valid_mask]
+            labels = labels[valid_mask]
+            ticker_data_aligned = ticker_data_aligned[valid_mask]
+        
+        logger.info(f"  Predictions: {len(predictions)} samples (after NaN drop)")
+        logger.info(f"  Returns: {len(returns)} samples")
+        logger.info(f"  Date range: {ticker_data_aligned.index[0]} to {ticker_data_aligned.index[-1]}")
+        logger.info(f"  First 5 predictions: {predictions[:5]}")
+        logger.info(f"  First 5 returns: {returns.values[:5]}")
         
         # Calculate long-only metrics
         metrics = calculate_long_only_metrics(
             predictions=predictions,
-            returns=pd.Series(returns),
+            returns=returns,
             labels=labels
         )
         
@@ -152,12 +201,12 @@ def main():
     
     # Run for both iterations
     iter1_results = run_long_only_backtest(
-        "Iteration 1 (Baseline)",
+        "Baseline",
         "data/processed/backtest_results.pkl"
     )
     
     iter2_results = run_long_only_backtest(
-        "Iteration 2 (Regime)",
+        "Regime",
         "data/processed/backtest_results_regime.pkl"
     )
     
@@ -168,7 +217,7 @@ def main():
         'timestamp': datetime.now().isoformat()
     }
     
-    output_file = Path('data/processed/backtest_results_longonly_corrected.pkl')
+    output_file = Path('data/processed/backtest_results_longonly.pkl')
     with open(output_file, 'wb') as f:
         pickle.dump(output, f)
     
@@ -178,7 +227,7 @@ def main():
     
     # Print summary
     logger.info("\n" + "="*80)
-    logger.info("SUMMARY - ITERATION 1 (BASELINE)")
+    logger.info("SUMMARY - BASELINE")
     logger.info("="*80)
     for item in iter1_results:
         logger.info(f"\n{item['model_name'].upper()} - {item['ticker']}:")
@@ -187,7 +236,7 @@ def main():
         logger.info(f"  MaxDD:  {item['metrics']['max_drawdown']:>8.2%}")
     
     logger.info("\n" + "="*80)
-    logger.info("SUMMARY - ITERATION 2 (REGIME)")
+    logger.info("SUMMARY - REGIME")
     logger.info("="*80)
     for item in iter2_results:
         logger.info(f"\n{item['model_name'].upper()} - {item['ticker']}:")
