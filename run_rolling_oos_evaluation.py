@@ -30,7 +30,7 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 
-# Define the exact 23 technical features used in walk_forward.py
+# Define the 17 pure technical features (baseline iteration 1)
 TECHNICAL_FEATURES = [
     # Returns (3)
     'ret_1d', 'ret_5d', 'ret_21d',
@@ -40,9 +40,6 @@ TECHNICAL_FEATURES = [
     'rsi_14', 'macd_line', 'macd_signal', 'macd_hist',
     'bb_mid', 'bb_upper', 'bb_lower', 'bb_pct', 'bb_width',
     'volume_ratio',
-    # Market conditions - DAILY ONLY (6)
-    'vix', 'vix_diff', 'vix_chg',
-    'oil', 'oil_diff', 'oil_chg',
     # Trend context (1)
     'sma_200_dist'
 ]
@@ -103,7 +100,7 @@ def get_feature_columns(data_df, iteration):
     """
     Get feature columns for the given iteration.
     
-    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 23 features
+    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 17 features
     as in walk_forward.py, plus ticker_id.
     
     Args:
@@ -189,7 +186,7 @@ def train_fold(data, fold_info, config, iteration):
     logger.info(f"Feature list: {feature_cols}")
     
     # ASSERTION: Verify feature count
-    expected_count = 23 if iteration == 1 else 27  # 22 technical + ticker_id, or 22 + ticker_id + 4 regime
+    expected_count = 18 if iteration == 1 else 22  # 17 technical + ticker_id, or 17 + ticker_id + 4 regime
     if len(feature_cols) != expected_count:
         error_msg = f"Feature count mismatch! Expected {expected_count}, got {len(feature_cols)}"
         logger.error(error_msg)
@@ -357,7 +354,7 @@ def main():
     
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
-        logger.info(f"ITERATION {iteration}: {'BASELINE (23 features + ticker_id)' if iteration == 1 else 'WITH REGIME FEATURES (23 + ticker_id + 4 regime)'}")
+        logger.info(f"ITERATION {iteration}: {'BASELINE (17 features + ticker_id)' if iteration == 1 else 'WITH REGIME FEATURES (17 + ticker_id + 4 regime)'}")
         logger.info(f"{'=' * 80}")
         
         iteration_results = []

@@ -68,17 +68,17 @@ class WalkForwardCV:
         """
         Get list of feature column names.
         
-        Excludes OHLCV, labels, and all monthly FRED macro features.
-        Keeps only the 21 technical features described in the thesis.
+        Excludes OHLCV, labels, and all external market variables (VIX, oil).
+        Keeps only the 17 pure technical features derived from price and volume.
         
         Args:
             data: DataFrame with all columns
             
         Returns:
-            List of feature column names (21 technical features)
+            List of feature column names (17 technical features)
         """
-        # Define the 23 features to KEEP (24 with ticker_id added later)
-        # Includes VIX and Oil because they are DAILY market variables, not monthly FRED macro
+        # Define the 17 pure technical features (18 with ticker_id added later)
+        # Excludes VIX and oil - these are used for GMM regime detection only
         TECHNICAL_FEATURES = [
             # Returns (3)
             'ret_1d', 'ret_5d', 'ret_21d',
@@ -88,9 +88,6 @@ class WalkForwardCV:
             'rsi_14', 'macd_line', 'macd_signal', 'macd_hist',
             'bb_mid', 'bb_upper', 'bb_lower', 'bb_pct', 'bb_width',
             'volume_ratio',
-            # Market conditions - DAILY ONLY (6)
-            'vix', 'vix_diff', 'vix_chg',
-            'oil', 'oil_diff', 'oil_chg',
             # Trend context (1)
             'sma_200_dist'
         ]

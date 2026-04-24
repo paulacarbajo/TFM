@@ -132,10 +132,14 @@ models:
   # label and label_binary are the target variables.
   # days_to_barrier is a labeling artefact, not a predictive feature.
   # 
-  # FRED EXCLUSIONS FOR BASELINE (Iteration 1):
-  # Per supervisor guidance, Iteration 1 uses ONLY technical indicators
-  # and daily market variables (vix, oil). All monthly FRED macroeconomic
-  # series are excluded from the baseline.
+  # BASELINE FEATURE SET (Iteration 1):
+  # Per supervisor guidance, Iteration 1 uses ONLY the 17 pure technical indicators
+  # derived from price and volume. All external market variables (VIX, oil) and
+  # monthly FRED macroeconomic series are excluded from the baseline.
+  # 
+  # These external variables are used as GMM inputs for regime detection in Iteration 2
+  # via train_data_full/val_data_full (passed directly from the full DataFrame),
+  # but they remain excluded from the feature matrix X in both iterations.
   # 
   # Note: Regime columns are NOT excluded here. They are added explicitly
   # in run_walk_forward_regime.py for iteration 2, and the walk-forward
@@ -150,6 +154,13 @@ models:
     - "label_binary"
     - "days_to_barrier"
     - "ret_1d_forward"  # Used for backtesting only, not as a feature
+    # Daily market variables (excluded from baseline, used for GMM in iteration 2)
+    - "vix"
+    - "vix_diff"
+    - "vix_chg"
+    - "oil"
+    - "oil_diff"
+    - "oil_chg"
     # Monthly FRED series (excluded from baseline)
     - "yield_10y"
     - "yield_10y_diff"

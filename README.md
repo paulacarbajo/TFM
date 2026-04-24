@@ -71,7 +71,7 @@ python main.py
 
 ### 3. Run Iteration 1 (Baseline)
 
-Train LightGBM and EBM models using expanding walk-forward validation (8 folds, 2008-2020) with 23 technical features:
+Train LightGBM and EBM models using expanding walk-forward validation (8 folds, 2008-2020) with 18 features (17 pure technical indicators + ticker_id):
 
 ```bash
 python run_walk_forward.py
@@ -83,7 +83,7 @@ python run_walk_forward.py
 
 ### 4. Run Iteration 2 (With Regime Features)
 
-Train models with 4 additional GMM regime features (27 total features):
+Train models with 4 additional GMM regime features (22 total features):
 
 ```bash
 python run_walk_forward_regime.py
@@ -173,7 +173,7 @@ python run_shap_analysis.py
 - **Walk-Forward Validation:** 8 folds, expanding window (2008-2020)
 - **OOS Period:** 2020-2024 (main evaluation), 2016-2020 (robustness check)
 - **Models:** LightGBM (gradient boosting), EBM (explainable boosting)
-- **Macroeconomic Features:** FRED series were excluded from the final feature set due to frequency mismatch (monthly releases forward-filled to daily frequency). Only daily market variables are used (VIX, oil).
+- **Macroeconomic Features:** All FRED series are excluded from the feature matrix X. VIX and oil are used exclusively as inputs for GMM regime detection in Iteration 2 via the full DataFrame, not as model features.
 
 ## Results Summary
 
