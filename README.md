@@ -186,13 +186,7 @@ The thesis demonstrates that:
 5. Annual retraining provides modest improvements but doesn't solve fundamental degradation
 6. SHAP analysis reveals volatility and momentum features as most important
 
-## License
 
-This code is provided for academic purposes as part of a Master's thesis.
-
-## Contact
-
-For questions about this implementation, please refer to the thesis document or contact the author through the academic institution.
 =======
 # TFM
 >>>>>>> 6729467df735d15b743653273db9655281285bd3
