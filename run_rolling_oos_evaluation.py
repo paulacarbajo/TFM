@@ -279,8 +279,13 @@ def train_fold(data, fold_info, config, iteration):
 
 def calculate_trading_metrics(predictions, test_data, strategy='long_only'):
     """Calculate trading metrics from predictions."""
-    # Get returns
-    returns = test_data['ret_1d'].values
+    # Get returns (use ret_1d_forward to avoid look-ahead bias)
+    returns = test_data['ret_1d_forward'].values
+    
+    # Drop NaN values (last row per ticker)
+    nan_mask = ~np.isnan(returns)
+    returns = returns[nan_mask]
+    predictions = predictions[nan_mask]
     
     # Convert predictions to signals
     if strategy == 'long_only':
