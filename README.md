@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Market Regime Detection and Knowledge Distillation for Financial Time Series
 
 This repository contains the implementation of a Master's thesis on supervised machine learning for binary classification of financial time series (SPY and USO ETFs) using the Triple Barrier Method for labeling, with two iterations: a baseline model and an enhanced version incorporating GMM-based market regime detection features.
@@ -185,8 +184,3 @@ The thesis demonstrates that:
 4. Long-only strategies show better risk-adjusted returns than long-short
 5. Annual retraining provides modest improvements but doesn't solve fundamental degradation
 6. SHAP analysis reveals volatility and momentum features as most important
-
-
-=======
-# TFM
->>>>>>> 6729467df735d15b743653273db9655281285bd3
