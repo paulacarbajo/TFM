@@ -91,17 +91,19 @@ def run_long_only_backtest(iteration_name, results_file):
     logger.info(f"Loaded results from {results_file}")
     logger.info(f"OOS period: {results['oos_start']} to {results['oos_end']}")
     
-    # Load price data for returns
+    # Load price data for returns (use engineered_features which has ret_1d_forward)
     with pd.HDFStore('data/processed/assets.h5', 'r') as store:
         keys = store.keys()
         logger.info(f"Available keys in HDF5: {keys}")
         
-        if '/df' in keys:
-            df = store['df']
-        elif 'df' in keys:
-            df = store['df']
+        # Load from engineered_features which contains all columns including ret_1d_forward
+        if '/engineered_features' in keys:
+            df = store['engineered_features']
+        elif 'engineered_features' in keys:
+            df = store['engineered_features']
         else:
-            df = store[keys[0]]
+            logger.error(f"engineered_features key not found. Available keys: {keys}")
+            raise KeyError("engineered_features not found in HDF5 file")
     
     # Filter to OOS period
     oos_start = pd.Timestamp(results['oos_start'])

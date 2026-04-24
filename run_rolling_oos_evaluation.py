@@ -30,7 +30,7 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 
-# Define the 17 pure technical features (baseline iteration 1)
+# Define the 16 pure technical features (baseline iteration 1)
 TECHNICAL_FEATURES = [
     # Returns (3)
     'ret_1d', 'ret_5d', 'ret_21d',
@@ -186,7 +186,7 @@ def train_fold(data, fold_info, config, iteration):
     logger.info(f"Feature list: {feature_cols}")
     
     # ASSERTION: Verify feature count
-    expected_count = 18 if iteration == 1 else 22  # 17 technical + ticker_id, or 17 + ticker_id + 4 regime
+    expected_count = 17 if iteration == 1 else 21  # 16 technical + ticker_id, or 16 + ticker_id + 4 regime
     if len(feature_cols) != expected_count:
         error_msg = f"Feature count mismatch! Expected {expected_count}, got {len(feature_cols)}"
         logger.error(error_msg)
@@ -354,7 +354,7 @@ def main():
     
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
-        logger.info(f"ITERATION {iteration}: {'BASELINE (17 features + ticker_id)' if iteration == 1 else 'WITH REGIME FEATURES (17 + ticker_id + 4 regime)'}")
+        logger.info(f"ITERATION {iteration}: {'BASELINE (16 pure technical features + ticker_id)' if iteration == 1 else 'WITH REGIME FEATURES (16 technical + ticker_id + 4 regime)'}")
         logger.info(f"{'=' * 80}")
         
         iteration_results = []

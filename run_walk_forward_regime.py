@@ -21,7 +21,7 @@ from pathlib import Path
 from loguru import logger
 
 from src.ingestion.loader import DataLoader
-from src.models import ModelTrainer, ModelEvaluator, WalkForwardCV
+from src.models import ModelTrainer, WalkForwardCV
 from src.models.regime_detection import RegimeDetector
 
 REGIME_COLS = [
@@ -65,7 +65,6 @@ def main():
     # Initialize components
     wf_cv = WalkForwardCV(config)
     trainer = ModelTrainer(config)
-    evaluator = ModelEvaluator(config)
 
     all_fold_results = []
 
@@ -137,27 +136,9 @@ def main():
         all_fold_results.append(fold_results)
         logger.info(f"Fold {fold_number} complete")
 
-    # Evaluate all folds
+    # Save results (evaluation will be done in backtest)
     logger.info("")
     logger.info("=" * 80)
-    logger.info("EVALUATING ALL FOLDS")
-    logger.info("=" * 80)
-
-    all_metrics, summary = evaluator.evaluate_all_folds(all_fold_results)
-
-    # Summary tables — dynamic model list
-    logger.info("\n" + "=" * 80)
-    logger.info("SUMMARY TABLES")
-    logger.info("=" * 80)
-
-    model_names = list({m['model_name'] for m in all_metrics})
-    for model_name in model_names:
-        table = evaluator.get_summary_table(all_metrics, model_name)
-        if not table.empty:
-            logger.info(f"\n{model_name.upper()} summary:\n{table.to_string()}")
-
-    # Save results
-    logger.info("\n" + "=" * 80)
     logger.info("SAVING RESULTS")
     logger.info("=" * 80)
 
@@ -166,20 +147,19 @@ def main():
 
     with open(output_path, 'wb') as f:
         pickle.dump({
-            'all_fold_results': all_fold_results,
-            'all_metrics': all_metrics,
-            'summary': summary
+            'all_fold_results': all_fold_results
         }, f)
 
-    logger.success(f"Results saved to {output_path}")
+    logger.info(f"Results saved to {output_path}")
 
     logger.info("\n" + "=" * 80)
     logger.info("WALK-FORWARD WITH REGIME DETECTION COMPLETE")
     logger.info("=" * 80)
-    logger.info(f"Folds processed:      {len(all_fold_results)}")
-    logger.info(f"Models trained:       LightGBM, EBM")
-    logger.info(f"Regime features:      {len(REGIME_COLS)} columns added per fold")
-    logger.info(f"Results saved to:     {output_path}")
+    logger.info(f"Total folds: {len(all_fold_results)}")
+    logger.info(f"Models trained: LightGBM, EBM")
+    logger.info(f"Regime features: {len(REGIME_COLS)} columns added per fold")
+    logger.info(f"Results saved: {output_path}")
+    logger.info(f"Note: Evaluation will be performed during backtesting")
     logger.info("=" * 80)
 
 

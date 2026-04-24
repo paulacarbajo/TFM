@@ -77,7 +77,7 @@ class WalkForwardCV:
         Returns:
             List of feature column names (17 technical features)
         """
-        # Define the 17 pure technical features (18 with ticker_id added later)
+        # Define the 16 pure technical features to KEEP (17 with ticker_id added later)
         # Excludes VIX and oil - these are used for GMM regime detection only
         TECHNICAL_FEATURES = [
             # Returns (3)
