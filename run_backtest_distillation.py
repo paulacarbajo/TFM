@@ -193,6 +193,8 @@ def get_predictions_and_proba(model, X_oos, original_labels):
     
     # Check model classes
     classes = model.classes_
+    assert set(classes).issubset({-1, 0, 1}), \
+        f"Unexpected model classes: {classes}. Expected subset of {{-1, 0, 1}}"
     
     if np.array_equal(classes, [-1, 1]):
         # Model trained on {-1, 1}

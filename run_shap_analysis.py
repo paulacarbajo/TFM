@@ -51,24 +51,20 @@ df_oos = df[oos_mask].copy()
 print(f"[OK] Loaded {len(df_oos)} rows")
 
 # ============================================================================
-# 3. PREPARE DATA (SAME AS BACKTEST)
+# 3. PREPARE DATA
 # ============================================================================
-print("\n[3] Preparing data with ticker_id...")
-
-# Add ticker_id (0=SPY, 1=USO)
-ticker_values = df_oos.index.get_level_values('ticker')
-df_oos['ticker_id'] = (ticker_values == 'USO').astype(int)
+print("\n[3] Preparing SPY data...")
 
 # Extract SPY data only
 spy_mask = df_oos.index.get_level_values('ticker') == 'SPY'
 df_spy = df_oos[spy_mask].copy()
 
-# Get features
+# Get features (use same feature_names from trained model)
 X_spy = df_spy[feature_names].reset_index(drop=True)
 y_spy = df_spy['label_binary'].reset_index(drop=True)
 
 print(f"[OK] SPY samples: {len(X_spy)}")
-print(f"[OK] Features used: {feature_names}")
+print(f"[OK] Features used ({len(feature_names)}): {feature_names}")
 
 # ============================================================================
 # 4. MAKE PREDICTIONS
@@ -207,20 +203,11 @@ print("\nTop 10 features by LightGBM importance:")
 for idx, row in importance_df.head(10).iterrows():
     print(f"  {row['feature']:<30} {row['importance']:>10.0f}")
 
-# Check if ticker_id is important
-ticker_id_importance = importance_df[importance_df['feature'] == 'ticker_id']
-if not ticker_id_importance.empty:
-    rank = (importance_df['feature'] == 'ticker_id').values.nonzero()[0][0] + 1
-    print(f"\nticker_id rank: {rank}/{len(feature_names)}")
-    print(f"ticker_id importance: {ticker_id_importance['importance'].values[0]:.0f}")
-else:
-    print("\nticker_id not found in features")
-
 # ============================================================================
-# 10. SUMMARY
+# 10. SUMMARY - ITERATION 1
 # ============================================================================
 print("\n" + "="*80)
-print("ANALYSIS COMPLETE")
+print("ITERATION 1 ANALYSIS COMPLETE")
 print("="*80)
 print(f"""
 KEY FINDINGS:
@@ -240,4 +227,202 @@ INTERPRETATION:
 The plots show which features are responsible for the model's bias
 toward short predictions in the OOS period.
 """)
+print("="*80)
+
+# ============================================================================
+# ITERATION 2: WITH REGIME FEATURES
+# ============================================================================
+print("\n\n" + "="*80)
+print("ITERATION 2: SHAP ANALYSIS WITH REGIME FEATURES")
+print("="*80)
+
+# ============================================================================
+# 11. LOAD REGIME MODEL AND DETECTOR
+# ============================================================================
+print("\n[11] Loading regime model from fold 8...")
+
+with open('data/processed/walk_forward_results_regime.pkl', 'rb') as f:
+    wf_results_regime = pickle.load(f)
+
+fold_8_regime = wf_results_regime['all_fold_results'][-1]
+lgbm_model_regime = fold_8_regime['models']['lightgbm']
+regime_detector = fold_8_regime['regime_detector']
+feature_names_regime = fold_8_regime['feature_names']
+
+print(f"[OK] Loaded LightGBM model from fold {fold_8_regime['fold_number']}")
+print(f"[OK] Features: {len(feature_names_regime)}")
+print(f"[OK] Loaded RegimeDetector")
+
+# ============================================================================
+# 12. ADD REGIME FEATURES TO OOS DATA
+# ============================================================================
+print("\n[12] Adding regime features to OOS data...")
+
+# Use the same df_oos from iteration 1
+# Predict regimes for OOS period
+regime_labels, regime_probs = regime_detector.predict(df_oos)
+
+df_oos_regime = df_oos.copy()
+df_oos_regime['regime_state'] = regime_labels
+df_oos_regime['regime_prob_0'] = regime_probs[:, 0]
+df_oos_regime['regime_prob_1'] = regime_probs[:, 1]
+df_oos_regime['regime_prob_2'] = regime_probs[:, 2]
+
+print(f"[OK] Added regime features to {len(df_oos_regime)} rows")
+
+# Extract SPY data only
+spy_mask_regime = df_oos_regime.index.get_level_values('ticker') == 'SPY'
+df_spy_regime = df_oos_regime[spy_mask_regime].copy()
+
+# Get features (20 features: 16 technical + 4 regime)
+X_spy_regime = df_spy_regime[feature_names_regime].reset_index(drop=True)
+y_spy_regime = df_spy_regime['label_binary'].reset_index(drop=True)
+
+print(f"[OK] SPY samples: {len(X_spy_regime)}")
+print(f"[OK] Features used ({len(feature_names_regime)}): {feature_names_regime}")
+
+# ============================================================================
+# 13. MAKE PREDICTIONS WITH REGIME MODEL
+# ============================================================================
+print("\n[13] Making predictions with regime model...")
+
+y_proba_regime = lgbm_model_regime.predict_proba(X_spy_regime)[:, 1]
+y_pred_binary_regime = (y_proba_regime > 0.5).astype(int)
+y_pred_signal_regime = np.where(y_pred_binary_regime == 1, 1, -1)
+
+n_long_regime = (y_pred_signal_regime == 1).sum()
+n_short_regime = (y_pred_signal_regime == -1).sum()
+
+print(f"[OK] Long predictions:  {n_long_regime:4d} ({n_long_regime/len(y_pred_signal_regime)*100:5.1f}%)")
+print(f"[OK] Short predictions: {n_short_regime:4d} ({n_short_regime/len(y_pred_signal_regime)*100:5.1f}%)")
+
+# ============================================================================
+# 14. COMPUTE SHAP VALUES FOR REGIME MODEL
+# ============================================================================
+print("\n[14] Computing SHAP values for regime model (this may take 1-2 minutes)...")
+
+explainer_regime = shap.TreeExplainer(lgbm_model_regime)
+shap_values_regime = explainer_regime.shap_values(X_spy_regime)
+
+# For binary classification, get values for positive class
+if isinstance(shap_values_regime, list):
+    shap_values_regime = shap_values_regime[1]
+
+print(f"[OK] SHAP values computed: {shap_values_regime.shape}")
+
+# ============================================================================
+# 15. SUMMARY PLOT - TOP 15 FEATURES (REGIME)
+# ============================================================================
+print("\n[15] Creating SHAP summary plot for regime model...")
+
+plt.figure(figsize=(12, 8))
+shap.summary_plot(
+    shap_values_regime, 
+    X_spy_regime, 
+    feature_names=feature_names_regime,
+    max_display=15,
+    show=False
+)
+plt.title('SHAP Summary: Top 15 Features with Regime (SPY, OOS 2020-2024)', fontsize=14, pad=20)
+plt.tight_layout()
+plt.savefig('notes/shap_summary_regime.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+print("[OK] Saved: notes/shap_summary_regime.png")
+
+# ============================================================================
+# 16. ANALYZE SHORT PREDICTIONS (REGIME)
+# ============================================================================
+print("\n[16] Analyzing features driving SHORT predictions (regime model)...")
+
+# Filter to short predictions only
+short_mask_regime = y_pred_signal_regime == -1
+X_short_regime = X_spy_regime[short_mask_regime]
+shap_short_regime = shap_values_regime[short_mask_regime]
+
+print(f"[OK] Analyzing {len(X_short_regime)} short predictions")
+
+# Calculate mean absolute SHAP value for each feature
+mean_abs_shap_regime = np.abs(shap_short_regime).mean(axis=0)
+
+# Create DataFrame for analysis
+shap_df_regime = pd.DataFrame({
+    'feature': feature_names_regime,
+    'mean_abs_shap': mean_abs_shap_regime,
+    'mean_shap': shap_short_regime.mean(axis=0)
+})
+
+# Sort by mean absolute SHAP (importance)
+shap_df_regime = shap_df_regime.sort_values('mean_abs_shap', ascending=False)
+
+print("\nTop 15 features driving SHORT predictions (with regime):")
+print("-" * 80)
+print(f"{'Feature':<30} {'Mean |SHAP|':<15} {'Mean SHAP':<15}")
+print("-" * 80)
+
+for idx, row in shap_df_regime.head(15).iterrows():
+    direction = "→ SHORT" if row['mean_shap'] < 0 else "→ LONG"
+    print(f"{row['feature']:<30} {row['mean_abs_shap']:>12.4f}    {row['mean_shap']:>12.4f} {direction}")
+
+# ============================================================================
+# 17. PLOT: FEATURES DRIVING SHORT PREDICTIONS (REGIME)
+# ============================================================================
+print("\n[17] Creating plot of short prediction drivers (regime model)...")
+
+top_15_short_regime = shap_df_regime.head(15).copy()
+
+fig, ax = plt.subplots(figsize=(12, 8))
+
+# Create horizontal bar plot
+colors_regime = ['red' if x < 0 else 'blue' for x in top_15_short_regime['mean_shap']]
+y_pos_regime = np.arange(len(top_15_short_regime))
+
+ax.barh(y_pos_regime, top_15_short_regime['mean_shap'], color=colors_regime, alpha=0.7)
+ax.set_yticks(y_pos_regime)
+ax.set_yticklabels(top_15_short_regime['feature'])
+ax.invert_yaxis()
+ax.set_xlabel('Mean SHAP Value', fontsize=12)
+ax.set_title('Top 15 Features Driving SHORT Predictions with Regime (SPY, OOS 2020-2024)', 
+             fontsize=14, pad=20)
+ax.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
+ax.grid(axis='x', alpha=0.3)
+
+# Add legend
+from matplotlib.patches import Patch
+legend_elements = [
+    Patch(facecolor='red', alpha=0.7, label='Pushes toward SHORT (-1)'),
+    Patch(facecolor='blue', alpha=0.7, label='Pushes toward LONG (+1)')
+]
+ax.legend(handles=legend_elements, loc='lower right')
+
+plt.tight_layout()
+plt.savefig('notes/shap_short_drivers_regime.png', dpi=300, bbox_inches='tight')
+plt.close()
+
+print("[OK] Saved: notes/shap_short_drivers_regime.png")
+
+# ============================================================================
+# 18. SUMMARY - ITERATION 2
+# ============================================================================
+print("\n" + "="*80)
+print("ITERATION 2 ANALYSIS COMPLETE")
+print("="*80)
+print(f"""
+KEY FINDINGS:
+- Total OOS predictions (SPY): {len(y_pred_signal_regime)}
+- Short predictions: {n_short_regime} ({n_short_regime/len(y_pred_signal_regime)*100:.1f}%)
+- Long predictions: {n_long_regime} ({n_long_regime/len(y_pred_signal_regime)*100:.1f}%)
+
+OUTPUTS:
+- notes/shap_summary_regime.png: Overall feature importance with regime
+- notes/shap_short_drivers_regime.png: Features driving short predictions with regime
+
+REGIME FEATURE IMPORTANCE:
+Check the plots to see how regime_state, regime_prob_0, regime_prob_1, and 
+regime_prob_2 rank among the 20 features in driving predictions.
+""")
+print("="*80)
+
+print("\n" + "="*80)
+print("ALL ANALYSES COMPLETE")
 print("="*80)
