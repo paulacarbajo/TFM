@@ -74,7 +74,7 @@ def main():
         logger.info("")
         logger.info("=" * 80)
         logger.info(
-            f"PROCESSING FOLD {fold_number}/{wf_cv.n_splits} "
+            f"PROCESSING FOLD {fold_number} "
             f"WITH REGIME DETECTION"
         )
         logger.info("=" * 80)

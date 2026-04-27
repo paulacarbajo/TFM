@@ -41,14 +41,9 @@ def calculate_long_only_metrics(predictions, returns, labels):
     cumulative_returns = (1 + strategy_returns).cumprod()
     total_return = cumulative_returns.iloc[-1] - 1
     
-    # Calculate Sharpe only on active trading days (positions == 1)
-    active_returns = strategy_returns[positions == 1]
-    
-    if len(active_returns) > 0 and active_returns.std() > 0:
-        # Annualize using fraction of days actively trading
-        active_fraction = len(active_returns) / len(strategy_returns)
-        trading_days_per_year = 252 * active_fraction
-        sharpe = (active_returns.mean() / active_returns.std()) * np.sqrt(trading_days_per_year)
+    # Sharpe ratio (annualized, computed over all days)
+    if strategy_returns.std() > 0:
+        sharpe = np.sqrt(252) * strategy_returns.mean() / strategy_returns.std()
     else:
         sharpe = 0.0
     

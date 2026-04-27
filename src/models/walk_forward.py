@@ -2,7 +2,7 @@
 Walk-Forward Cross-Validation Module
 
 Implements walk-forward validation for time series financial data.
-Uses expanding window approach where training set grows with each fold.
+Supports both expanding and rolling window approaches.
 """
 
 from typing import Dict, Any, List, Tuple, Generator
@@ -16,16 +16,34 @@ class WalkForwardCV:
     """
     Walk-forward cross-validation for time series data.
     
-    Uses expanding window approach:
-    - Training set grows with each fold
-    - Validation window has fixed size
-    - Ensures no look-ahead bias
+    Trains exclusively on SPY (S&P 500 ETF) using pure technical indicators
+    derived from price and volume data.
     
-    Example with 8 splits and 1-year validation window:
-        Fold 1: train 2008-2011, val 2012
-        Fold 2: train 2008-2012, val 2013
-        ...
-        Fold 8: train 2008-2019, val 2020
+    Supports two window types:
+    
+    1. Rolling window (default):
+       - Fixed-size training window (e.g., 3 years)
+       - Slides forward by 1 year per fold
+       - Validation window follows training window (e.g., 1 year)
+       - No overlap between validation periods
+       
+       Example with 3-year train, 1-year val:
+           Fold 1: train 2008-2010, val 2011
+           Fold 2: train 2009-2011, val 2012
+           Fold 3: train 2010-2012, val 2013
+           ...
+    
+    2. Expanding window (legacy):
+       - Training set grows with each fold
+       - Validation window has fixed size
+       
+       Example with 8 splits and 1-year validation:
+           Fold 1: train 2008-2011, val 2012
+           Fold 2: train 2008-2012, val 2013
+           ...
+           Fold 8: train 2008-2019, val 2020
+    
+    Ensures no look-ahead bias in both modes.
     
     Attributes:
         config (Dict[str, Any]): Configuration dictionary
@@ -49,7 +67,8 @@ class WalkForwardCV:
         self.test_end = pd.to_datetime(wf_config.get('test_end', '2024-12-31'))
         
         # Walk-forward parameters
-        self.n_splits = wf_config.get('n_splits', 8)
+        self.window_type = wf_config.get('window_type', 'rolling')
+        self.train_window_years = wf_config.get('train_window_years', 3)
         self.val_window_years = wf_config.get('val_window_years', 1)
         
         # Feature exclusions
@@ -59,9 +78,11 @@ class WalkForwardCV:
         ])
         
         logger.info("WalkForwardCV initialized")
+        logger.info(f"Window type: {self.window_type}")
         logger.info(f"Training period: {self.train_start.date()} to {self.train_end.date()}")
         logger.info(f"Test period: {self.test_start.date()} to {self.test_end.date()}")
-        logger.info(f"Number of splits: {self.n_splits}")
+        if self.window_type == 'rolling':
+            logger.info(f"Training window: {self.train_window_years} year(s)")
         logger.info(f"Validation window: {self.val_window_years} year(s)")
     
     def get_feature_names(self, data: pd.DataFrame) -> List[str]:
@@ -69,15 +90,15 @@ class WalkForwardCV:
         Get list of feature column names.
         
         Excludes OHLCV, labels, and all external market variables (VIX, oil).
-        Keeps only the 17 pure technical features derived from price and volume.
+        Keeps only the 16 pure technical features derived from price and volume.
         
         Args:
             data: DataFrame with all columns
             
         Returns:
-            List of feature column names (17 technical features)
+            List of feature column names (16 technical features)
         """
-        # Define the 16 pure technical features to KEEP (17 with ticker_id added later)
+        # Define the 16 pure technical features to KEEP
         # Excludes VIX and oil - these are used for GMM regime detection only
         TECHNICAL_FEATURES = [
             # Returns (3)
@@ -141,7 +162,6 @@ class WalkForwardCV:
         Prepare X (features) and y (target) from data.
         
         Removes rows with NaN in target or features.
-        Adds ticker_id as a feature (0 for SPY, 1 for USO).
         
         Args:
             data: DataFrame with features and target
@@ -153,10 +173,6 @@ class WalkForwardCV:
         # Extract features and target
         X = data[feature_columns].copy()
         y = data['label_binary'].copy()
-        
-        # Add ticker_id as a feature (0 for SPY, 1 for USO)
-        ticker_values = X.index.get_level_values('ticker')
-        X['ticker_id'] = (ticker_values == 'USO').astype(int)
         
         # Remove rows where target is NaN (label_binary NaN = label 0)
         valid_mask = y.notna()
@@ -174,32 +190,64 @@ class WalkForwardCV:
         """
         Calculate date ranges for each fold.
         
+        For rolling window: fixed-size training window slides forward by 1 year per fold
+        For expanding window: training window grows with each fold
+        
         Returns:
             List of dictionaries with train/val date ranges
         """
         folds = []
-        total_days = (self.train_end - self.train_start).days
-        val_days = int(self.val_window_years * 365)
         
-        available_days = total_days - val_days
-        step_days = available_days // (self.n_splits - 1)
-        
-        for i in range(self.n_splits):
-            val_start = self.train_start + pd.Timedelta(days=step_days * i + val_days)
-            val_end = val_start + pd.Timedelta(days=val_days)
+        if self.window_type == 'rolling':
+            # Rolling window: fixed training window size, slides forward by 1 year
+            fold_num = 1
+            current_train_start = self.train_start
             
-            # Last folds ends in train_end
-            if i == self.n_splits - 1:
-                val_end = self.train_end
-                val_start = val_end - pd.Timedelta(days=val_days)
+            while True:
+                train_end = current_train_start + pd.DateOffset(years=self.train_window_years)
+                val_start = train_end
+                val_end = val_start + pd.DateOffset(years=self.val_window_years)
+                
+                # Stop if validation window exceeds train_end
+                if val_end > self.train_end:
+                    break
+                
+                folds.append({
+                    'fold': fold_num,
+                    'train_start': current_train_start,
+                    'train_end': train_end,
+                    'val_start': val_start,
+                    'val_end': val_end
+                })
+                
+                # Slide window forward by 1 year
+                current_train_start += pd.DateOffset(years=1)
+                fold_num += 1
             
-            folds.append({
-                'fold': i + 1,
-                'train_start': self.train_start,
-                'train_end': val_start,
-                'val_start': val_start,
-                'val_end': val_end
-            })
+        else:
+            # Expanding window: training grows with each fold (legacy behavior)
+            total_days = (self.train_end - self.train_start).days
+            val_days = int(self.val_window_years * 365)
+            
+            available_days = total_days - val_days
+            step_days = available_days // (self.n_splits - 1)
+            
+            for i in range(self.n_splits):
+                val_start = self.train_start + pd.Timedelta(days=step_days * i + val_days)
+                val_end = val_start + pd.Timedelta(days=val_days)
+                
+                # Last fold ends in train_end
+                if i == self.n_splits - 1:
+                    val_end = self.train_end
+                    val_start = val_end - pd.Timedelta(days=val_days)
+                
+                folds.append({
+                    'fold': i + 1,
+                    'train_start': self.train_start,
+                    'train_end': val_start,
+                    'val_start': val_start,
+                    'val_end': val_end
+                })
         
         return folds
     
@@ -226,6 +274,7 @@ class WalkForwardCV:
         
         # Get fold date ranges
         fold_dates = self._get_fold_dates()
+        total_folds = len(fold_dates)
         
         # Generate each fold
         for fold_info in fold_dates:
@@ -233,7 +282,7 @@ class WalkForwardCV:
             
             logger.info("")
             logger.info("=" * 80)
-            logger.info(f"FOLD {fold_num}/{self.n_splits}")
+            logger.info(f"FOLD {fold_num}/{total_folds}")
             logger.info("=" * 80)
             
             # Filter data by date ranges
@@ -261,23 +310,6 @@ class WalkForwardCV:
             logger.info(f"Train rows (after cleaning): {len(X_train)}")
             logger.info(f"Val rows (after cleaning): {len(X_val)}")
             
-            # Log distribution by ticker
-            if len(X_train) > 0:
-                train_tickers = X_train.index.get_level_values('ticker').unique()
-                logger.info(f"Train tickers: {train_tickers.tolist()}")
-                for ticker in train_tickers:
-                    ticker_mask = X_train.index.get_level_values('ticker') == ticker
-                    ticker_count = ticker_mask.sum()
-                    logger.info(f"  {ticker}: {ticker_count} samples")
-            
-            if len(X_val) > 0:
-                val_tickers = X_val.index.get_level_values('ticker').unique()
-                logger.info(f"Val tickers: {val_tickers.tolist()}")
-                for ticker in val_tickers:
-                    ticker_mask = X_val.index.get_level_values('ticker') == ticker
-                    ticker_count = ticker_mask.sum()
-                    logger.info(f"  {ticker}: {ticker_count} samples")
-            
             # Log label distribution
             if len(y_train) > 0:
                 train_dist = y_train.value_counts().sort_index()
@@ -294,7 +326,6 @@ class WalkForwardCV:
                     logger.info(f"  Label {int(label):2d}: {count:5d} ({pct:5.2f}%)")
             
             # Yield fold data
-            # Note: ticker_id was added in _prepare_xy, so include it in feature_names
             # Also include full DataFrames (train_data_full, val_data_full) for regime detection
             yield {
                 'fold_number': fold_num,
@@ -308,7 +339,7 @@ class WalkForwardCV:
                 'y_val': y_val,
                 'train_dates': X_train.index.get_level_values('date'),
                 'val_dates': X_val.index.get_level_values('date'),
-                'feature_names': feature_columns + ['ticker_id'],
+                'feature_names': feature_columns,
                 'train_data_full': train_data,  # Full DataFrame with all columns including vix
                 'val_data_full': val_data  # Full DataFrame with all columns including vix
             }
@@ -347,15 +378,6 @@ class WalkForwardCV:
         X_test, y_test = self._prepare_xy(test_data, feature_columns)
         logger.info(f"Test rows (after cleaning): {len(X_test)}")
         
-        # Log distribution by ticker
-        if len(X_test) > 0:
-            test_tickers = X_test.index.get_level_values('ticker').unique()
-            logger.info(f"Test tickers: {test_tickers.tolist()}")
-            for ticker in test_tickers:
-                ticker_mask = X_test.index.get_level_values('ticker') == ticker
-                ticker_count = ticker_mask.sum()
-                logger.info(f"  {ticker}: {ticker_count} samples")
-        
         # Log label distribution
         if len(y_test) > 0:
             test_dist = y_test.value_counts().sort_index()
@@ -366,7 +388,7 @@ class WalkForwardCV:
         
         logger.info("=" * 80)
         
-        return X_test, y_test, feature_columns + ['ticker_id']
+        return X_test, y_test, feature_columns
     
     def get_summary(self) -> Dict[str, Any]:
         """
@@ -378,11 +400,13 @@ class WalkForwardCV:
         fold_dates = self._get_fold_dates()
         
         summary = {
+            'window_type': self.window_type,
             'train_start': self.train_start.strftime('%Y-%m-%d'),
             'train_end': self.train_end.strftime('%Y-%m-%d'),
             'test_start': self.test_start.strftime('%Y-%m-%d'),
             'test_end': self.test_end.strftime('%Y-%m-%d'),
-            'n_splits': self.n_splits,
+            'n_splits': len(fold_dates),
+            'train_window_years': self.train_window_years if self.window_type == 'rolling' else None,
             'val_window_years': self.val_window_years,
             'folds': [
                 {

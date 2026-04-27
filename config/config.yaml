@@ -5,58 +5,12 @@ data_sources:
   spy:
     ticker: "SPY"
     name: "S&P 500 ETF"
-  uso:
-    ticker: "USO"
-    name: "WTI Oil ETF"
-    start_date: "2006-04-10"  # USO started trading on this date
 
 # FRED economic data series
 fred_series:
   vix:
     series_id: "VIXCLS"
     name: "VIX Volatility Index"
-  yield_10y:
-    series_id: "DGS10"
-    name: "10-Year Treasury Yield"
-  yield_2y:
-    series_id: "DGS2"
-    name: "2-Year Treasury Yield"
-  yield_1y:
-    series_id: "DGS1"
-    name: "1-Year Treasury Yield"
-  corp_oas:
-    series_id: "BAMLC0A0CM"
-    name: "Corporate IG OAS"
-  hy_oas:
-    series_id: "BAMLH0A0HYM2"
-    name: "High Yield OAS"
-  sentiment:
-    series_id: "UMCSENT"
-    name: "Consumer Sentiment"
-  real_gdp:
-    series_id: "GDPC1"
-    name: "Real GDP"
-  oil:
-    series_id: "DCOILWTICO"
-    name: "WTI Oil Price"
-  inflacion:
-    series_id: "CPIAUCSL"
-    name: "CPI Inflation"
-  leading:
-    series_id: "USSLIND"
-    name: "Leading Indicators"
-  empleo:
-    series_id: "UNRATE"
-    name: "Unemployment Rate"
-  weekjobclaims:
-    series_id: "ICSA"
-    name: "Weekly Jobless Claims"
-  retail_sales:
-    series_id: "RSXFS"
-    name: "Retail Sales"
-  us_asset_balance:
-    series_id: "WALCL"
-    name: "Fed Balance Sheet"
 
 # Ingestion parameters
 ingestion:
@@ -115,7 +69,7 @@ features:
 # Model Configuration
 models:
   # Walk-forward cross-validation
-  # Expanding window with 8 folds over 2008-2020.
+  # Rolling window with auto-computed folds over 2008-2020.
   # train_start is set to 2008 to allow a 4-year warmup period
   # for technical indicators (longest lookback: MACD slow=26 days).
   # OOS period 2020-2024 is held out and never used during training.
@@ -124,8 +78,9 @@ models:
     train_end: "2020-01-01"
     test_start: "2020-01-01"
     test_end: "2024-12-31"
-    n_splits: 8
-    val_window_years: 1
+    window_type: "rolling"  # "rolling" or "expanding"
+    train_window_years: 3   # Fixed training window size (rolling only)
+    val_window_years: 1     # Validation window size
 
   # Columns excluded from the feature matrix X.
   # OHLCV columns are raw price data and must not be used as features.
@@ -154,53 +109,10 @@ models:
     - "label_binary"
     - "days_to_barrier"
     - "ret_1d_forward"  # Used for backtesting only, not as a feature
-    # Daily market variables (excluded from baseline, used for GMM in iteration 2)
+    # VIX variables (excluded from baseline, used for GMM in iteration 2)
     - "vix"
     - "vix_diff"
     - "vix_chg"
-    - "oil"
-    - "oil_diff"
-    - "oil_chg"
-    # Monthly FRED series (excluded from baseline)
-    - "yield_10y"
-    - "yield_10y_diff"
-    - "yield_10y_chg"
-    - "yield_2y"
-    - "yield_2y_diff"
-    - "yield_2y_chg"
-    - "yield_1y"
-    - "yield_1y_diff"
-    - "yield_1y_chg"
-    - "corp_oas"
-    - "corp_oas_diff"
-    - "corp_oas_chg"
-    - "hy_oas"
-    - "hy_oas_diff"
-    - "hy_oas_chg"
-    - "sentiment"
-    - "sentiment_diff"
-    - "sentiment_chg"
-    - "real_gdp"
-    - "real_gdp_diff"
-    - "real_gdp_chg"
-    - "inflacion"
-    - "inflacion_diff"
-    - "inflacion_chg"
-    - "leading"
-    - "leading_diff"
-    - "leading_chg"
-    - "empleo"
-    - "empleo_diff"
-    - "empleo_chg"
-    - "weekjobclaims"
-    - "weekjobclaims_diff"
-    - "weekjobclaims_chg"
-    - "retail_sales"
-    - "retail_sales_diff"
-    - "retail_sales_chg"
-    - "us_asset_balance"
-    - "us_asset_balance_diff"
-    - "us_asset_balance_chg"
 
   # LightGBM configuration
   lightgbm:

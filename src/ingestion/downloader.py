@@ -89,6 +89,39 @@ class DataDownloader:
                 group_by='ticker'
             )
 
+            # Check if data is empty and try fallback for single ticker
+            if data.empty and len(tickers) == 1:
+                logger.warning(f"yf.download() returned empty data for {tickers[0]}, trying fallback...")
+                ticker = tickers[0]
+                ticker_obj = yf.Ticker(ticker)
+                data = ticker_obj.history(
+                    start=start,
+                    end=end,
+                    interval=self.frequency,
+                    auto_adjust=True
+                )
+                
+                # Debug: log what yfinance returned
+                logger.debug(f"Fallback data columns: {data.columns.tolist()}")
+                logger.debug(f"Fallback data head:\n{data.head(2)}")
+                
+                # Flatten MultiIndex columns if present
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                
+                # Rename columns to standard OHLCV names if needed
+                data.columns = [str(col).strip() for col in data.columns]
+                
+                # Drop timezone from index if present
+                if hasattr(data.index, 'tz') and data.index.tz is not None:
+                    data.index = data.index.tz_localize(None)
+                
+                if data.empty:
+                    raise ValueError(f"No data returned for ticker: {ticker} (both methods failed)")
+                
+                logger.success(f"Fallback successful for {ticker}")
+
+            # Final check after potential fallback
             if data.empty:
                 raise ValueError(f"No data returned for tickers: {tickers}")
 

@@ -422,7 +422,7 @@ class ModelTrainer:
         results = []
         for fold_data in wf_cv.split(data):
             fold_number = fold_data['fold_number']
-            logger.info(f"\nTraining fold {fold_number}/{wf_cv.n_splits}...")
+            logger.info(f"\nTraining fold {fold_number}...")
             results.append(self.train_fold(fold_data))
 
         logger.info("")
