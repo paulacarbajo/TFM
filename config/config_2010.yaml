@@ -1,0 +1,129 @@
+# Experiment config: training start 2010 (vs 2008 baseline)
+#
+# Identical to config.yaml except train_start is moved to 2010-01-01.
+# Rationale: folds 1-2 (2008-2011, 2009-2012) are dominated by the
+# Lehman crisis and its aftermath — a structural break not present in
+# the OOS period (2020-2024). Removing them reduces crisis-driven short
+# bias and yields 7 IS folds instead of 9.
+#
+# Run with: python run_walk_forward.py --config config/config_2010.yaml
+# Output PKLs get the '_2010' suffix (e.g. walk_forward_results_2010.pkl)
+
+# yfinance data sources
+data_sources:
+  spy:
+    ticker: "SPY"
+    name: "S&P 500 ETF"
+
+# FRED economic data series
+fred_series:
+  vix:
+    series_id: "VIXCLS"
+    name: "VIX Volatility Index"
+    release_lag_days: 0  # Daily series, published same day — no shift needed
+
+# Ingestion parameters
+ingestion:
+  start_date: "2004-01-01"
+  end_date: "2024-12-31"     # Fixed for reproducibility
+  frequency: "1d"
+  raw_data_path: "data/raw/"
+  processed_data_path: "data/processed/"
+  hdf5_file: "data/processed/assets.h5"
+
+  # HDF5 keys
+  hdf5_keys:
+    raw_data: "data_raw"
+    engineered_features: "engineered_features"
+
+  # Data alignment
+  alignment:
+    method: "inner"  # inner join between yfinance and FRED trading dates
+
+  # FRED transformations
+  fred_transformations:
+    add_diff: true        # Add _diff columns (first difference)
+    add_pct_change: true  # Add _chg columns (percentage change)
+
+# Feature Engineering Configuration
+features:
+  technical:
+    momentum_periods: [1, 5, 21]
+    volatility_period: 20
+    rsi_period: 14
+    macd_fast: 12
+    macd_slow: 26
+    macd_signal: 9
+    bollinger_period: 20
+    bollinger_std: 2
+    atr_period: 14
+    volume_ma_period: 20
+
+  triple_barrier:
+    max_holding_period: 8   # Maximum holding period in days (time barrier)
+    vol_multiplier: 1.0     # Volatility multiplier k for barrier width
+    min_ret: 0.0            # Minimum return threshold (0 = purely volatility-based)
+
+# Model Configuration
+models:
+  walk_forward:
+    train_start: "2010-01-01"   # KEY DIFFERENCE: skip Lehman crisis folds (2008-2009)
+    train_end: "2020-01-01"
+    test_start: "2020-01-01"
+    test_end: "2024-12-31"
+    window_type: "rolling"
+    train_window_years: 3
+    val_window_years: 1
+    label_column: "label_binary" # Training target (triple barrier: 1=take profit, -1=stop loss or time barrier)
+    ic_threshold: 0.02
+    ic_min_features: 6
+
+  exclude_from_features:
+    - "Close"
+    - "High"
+    - "Low"
+    - "Open"
+    - "Volume"
+    - "label"
+    - "label_binary"
+    - "days_to_barrier"
+    - "ret_1d_forward"
+    - "ret_5d_forward"
+    - "label_5d_binary"
+    - "ret_10d_forward"
+    - "label_10d_binary"
+    - "vix"
+    - "vix_diff"
+    - "vix_chg"
+
+  lightgbm:
+    n_estimators: 300
+    learning_rate: 0.05
+    max_depth: 6
+    num_leaves: 20
+    min_child_samples: 50
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_gain_to_split: 0.01
+    class_weight: "balanced"
+    random_state: 42
+
+  ebm:
+    max_bins: 128
+    max_interaction_bins: 32
+    interactions: 5
+    learning_rate: 0.01
+    max_rounds: 3000
+    min_samples_leaf: 10
+    random_state: 42
+
+  rulefit:
+    enabled: false
+    n_estimators: 100
+    tree_size: 3
+    max_rules: 50
+    alpha: 0.1
+    include_linear: true
+    random_state: 42

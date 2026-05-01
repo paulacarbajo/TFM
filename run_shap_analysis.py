@@ -6,9 +6,11 @@ Uses SHAP values to understand model behavior and identify key drivers of short 
 """
 
 import pickle
+import yaml
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import shap
 import sys
 from pathlib import Path
@@ -17,23 +19,40 @@ from pathlib import Path
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
 
+import argparse
+
+parser = argparse.ArgumentParser(description='SHAP analysis for OOS period')
+parser.add_argument('--config', default='config/config.yaml',
+                    help='Path to config YAML (default: config/config.yaml)')
+args, _ = parser.parse_known_args()
+config_stem = Path(args.config).stem
+suffix = config_stem[len('config'):]
+
+with open(args.config, 'r') as f:
+    config = yaml.safe_load(f)
+wf_cfg = config.get('models', {}).get('walk_forward', {})
+oos_start = wf_cfg.get('test_start', '2020-01-01')
+oos_end = wf_cfg.get('test_end', '2024-12-31')
+
 print("="*80)
 print("SHAP ANALYSIS: UNDERSTANDING SHORT PREDICTIONS")
+print("="*80)
+print(f"Config: {args.config}  (output suffix: '{suffix}')")
 print("="*80)
 
 # ============================================================================
 # 1. LOAD TRAINED MODELS
 # ============================================================================
-print("\n[1] Loading trained models from fold 8...")
+print("\n[1] Loading trained models from last fold (most recent training data)...")
 
-with open('data/processed/walk_forward_results.pkl', 'rb') as f:
+with open(f'data/processed/walk_forward_results{suffix}.pkl', 'rb') as f:
     wf_results = pickle.load(f)
 
-fold_8 = wf_results['all_fold_results'][-1]
-lgbm_model = fold_8['models']['lightgbm']
-feature_names = fold_8['feature_names']
+last_fold = wf_results['all_fold_results'][-1]
+lgbm_model = last_fold['models']['lightgbm']
+feature_names = last_fold['feature_names']
 
-print(f"[OK] Loaded LightGBM model from fold {fold_8['fold_number']}")
+print(f"[OK] Loaded LightGBM model from fold {last_fold['fold_number']}")
 print(f"[OK] Features: {len(feature_names)}")
 
 # ============================================================================
@@ -45,7 +64,7 @@ df = pd.read_hdf('data/processed/assets.h5', key='engineered_features')
 
 # Filter by date using the date level of the MultiIndex
 dates = df.index.get_level_values('date')
-oos_mask = (dates >= '2020-01-01') & (dates <= '2024-12-31')
+oos_mask = (dates >= oos_start) & (dates <= oos_end)
 df_oos = df[oos_mask].copy()
 
 print(f"[OK] Loaded {len(df_oos)} rows")
@@ -59,11 +78,15 @@ print("\n[3] Preparing SPY data...")
 spy_mask = df_oos.index.get_level_values('ticker') == 'SPY'
 df_spy = df_oos[spy_mask].copy()
 
+# Drop rows with NaN in features or label (last 8 rows have NaN label_binary, max_holding_period)
+valid_mask = df_spy[feature_names].notna().all(axis=1) & df_spy['label_binary'].notna()
+df_spy = df_spy[valid_mask]
+
 # Get features (use same feature_names from trained model)
 X_spy = df_spy[feature_names].reset_index(drop=True)
 y_spy = df_spy['label_binary'].reset_index(drop=True)
 
-print(f"[OK] SPY samples: {len(X_spy)}")
+print(f"[OK] SPY samples: {len(X_spy)} (dropped {(~valid_mask).sum()} NaN rows)")
 print(f"[OK] Features used ({len(feature_names)}): {feature_names}")
 
 # ============================================================================
@@ -173,10 +196,9 @@ ax.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
 ax.grid(axis='x', alpha=0.3)
 
 # Add legend
-from matplotlib.patches import Patch
 legend_elements = [
-    Patch(facecolor='red', alpha=0.7, label='Pushes toward SHORT (-1)'),
-    Patch(facecolor='blue', alpha=0.7, label='Pushes toward LONG (+1)')
+    mpatches.Patch(facecolor='red', alpha=0.7, label='Pushes toward SHORT (-1)'),
+    mpatches.Patch(facecolor='blue', alpha=0.7, label='Pushes toward LONG (+1)')
 ]
 ax.legend(handles=legend_elements, loc='lower right')
 
@@ -239,17 +261,17 @@ print("="*80)
 # ============================================================================
 # 11. LOAD REGIME MODEL AND DETECTOR
 # ============================================================================
-print("\n[11] Loading regime model from fold 8...")
+print("\n[11] Loading regime model from last fold (most recent training data)...")
 
-with open('data/processed/walk_forward_results_regime.pkl', 'rb') as f:
+with open(f'data/processed/walk_forward_results_regime{suffix}.pkl', 'rb') as f:
     wf_results_regime = pickle.load(f)
 
-fold_8_regime = wf_results_regime['all_fold_results'][-1]
-lgbm_model_regime = fold_8_regime['models']['lightgbm']
-regime_detector = fold_8_regime['regime_detector']
-feature_names_regime = fold_8_regime['feature_names']
+last_fold_regime = wf_results_regime['all_fold_results'][-1]
+lgbm_model_regime = last_fold_regime['models']['lightgbm']
+regime_detector = last_fold_regime['regime_detector']
+feature_names_regime = last_fold_regime['feature_names']
 
-print(f"[OK] Loaded LightGBM model from fold {fold_8_regime['fold_number']}")
+print(f"[OK] Loaded LightGBM model from fold {last_fold_regime['fold_number']}")
 print(f"[OK] Features: {len(feature_names_regime)}")
 print(f"[OK] Loaded RegimeDetector")
 
@@ -274,11 +296,15 @@ print(f"[OK] Added regime features to {len(df_oos_regime)} rows")
 spy_mask_regime = df_oos_regime.index.get_level_values('ticker') == 'SPY'
 df_spy_regime = df_oos_regime[spy_mask_regime].copy()
 
-# Get features (20 features: 16 technical + 4 regime)
+# Drop rows with NaN in features or label (last 8 rows have NaN label_binary, max_holding_period)
+valid_mask_regime = df_spy_regime[feature_names_regime].notna().all(axis=1) & df_spy_regime['label_binary'].notna()
+df_spy_regime = df_spy_regime[valid_mask_regime]
+
+# Get features (15 features: 11 technical + 4 regime)
 X_spy_regime = df_spy_regime[feature_names_regime].reset_index(drop=True)
 y_spy_regime = df_spy_regime['label_binary'].reset_index(drop=True)
 
-print(f"[OK] SPY samples: {len(X_spy_regime)}")
+print(f"[OK] SPY samples: {len(X_spy_regime)} (dropped {(~valid_mask_regime).sum()} NaN rows)")
 print(f"[OK] Features used ({len(feature_names_regime)}): {feature_names_regime}")
 
 # ============================================================================
@@ -388,10 +414,9 @@ ax.axvline(x=0, color='black', linestyle='-', linewidth=0.8)
 ax.grid(axis='x', alpha=0.3)
 
 # Add legend
-from matplotlib.patches import Patch
 legend_elements = [
-    Patch(facecolor='red', alpha=0.7, label='Pushes toward SHORT (-1)'),
-    Patch(facecolor='blue', alpha=0.7, label='Pushes toward LONG (+1)')
+    mpatches.Patch(facecolor='red', alpha=0.7, label='Pushes toward SHORT (-1)'),
+    mpatches.Patch(facecolor='blue', alpha=0.7, label='Pushes toward LONG (+1)')
 ]
 ax.legend(handles=legend_elements, loc='lower right')
 
@@ -418,8 +443,8 @@ OUTPUTS:
 - notes/shap_short_drivers_regime.png: Features driving short predictions with regime
 
 REGIME FEATURE IMPORTANCE:
-Check the plots to see how regime_state, regime_prob_0, regime_prob_1, and 
-regime_prob_2 rank among the 20 features in driving predictions.
+Check the plots to see how regime_state, regime_prob_0, regime_prob_1, and
+regime_prob_2 rank among the 15 features in driving predictions.
 """)
 print("="*80)
 

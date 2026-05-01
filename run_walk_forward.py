@@ -5,6 +5,7 @@ Trains LightGBM and EBM on all folds and evaluates performance.
 Results are saved to data/processed/walk_forward_results.pkl.
 """
 
+import argparse
 import warnings
 import yaml
 import pickle
@@ -17,6 +18,15 @@ from src.models import ModelTrainer
 
 def main():
     """Run complete walk-forward cross-validation."""
+    parser = argparse.ArgumentParser(description='Walk-forward cross-validation')
+    parser.add_argument('--config', default='config/config.yaml',
+                        help='Path to config YAML (default: config/config.yaml)')
+    args = parser.parse_args()
+
+    # Derive output suffix from config stem: 'config' → '', 'config_2010' → '_2010'
+    config_stem = Path(args.config).stem
+    suffix = config_stem[len('config'):]
+
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -30,8 +40,9 @@ def main():
     logger.info("=" * 80)
     logger.info("STARTING WALK-FORWARD CROSS-VALIDATION")
     logger.info("=" * 80)
+    logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
 
-    with open('config/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
     # Load data
@@ -46,9 +57,9 @@ def main():
     all_fold_results = trainer.train_all_folds(data)
     logger.info(f"Training complete: {len(all_fold_results)} folds")
 
-    # Save results (evaluation will be done in backtest)
+    # Save results — used by run_shap_analysis.py and run_rolling_oos_evaluation.py
     logger.info("\n3. Saving results...")
-    output_path = Path('data/processed/walk_forward_results.pkl')
+    output_path = Path(f'data/processed/walk_forward_results{suffix}.pkl')
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'wb') as f:
@@ -62,9 +73,9 @@ def main():
     logger.info("WALK-FORWARD CROSS-VALIDATION COMPLETE")
     logger.info("=" * 80)
     logger.info(f"Total folds: {len(all_fold_results)}")
-    logger.info(f"Models trained: LightGBM, EBM")
+    logger.info(f"Models trained: LightGBM (EBM Distilled and RuleFit applied separately)")
     logger.info(f"Results saved: {output_path}")
-    logger.info(f"Note: Evaluation will be performed during backtesting")
+    logger.info(f"Next steps: run_shap_analysis.py (fold SHAP) · run_rolling_oos_evaluation.py (quarterly backtest)")
     logger.info("=" * 80)
 
 

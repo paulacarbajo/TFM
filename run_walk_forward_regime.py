@@ -14,6 +14,7 @@ Regime features added per fold:
 Results are saved to data/processed/walk_forward_results_regime.pkl.
 """
 
+import argparse
 import warnings
 import yaml
 import pickle
@@ -34,6 +35,14 @@ REGIME_COLS = [
 
 def main():
     """Run walk-forward cross-validation with regime detection."""
+    parser = argparse.ArgumentParser(description='Walk-forward CV with regime detection')
+    parser.add_argument('--config', default='config/config.yaml',
+                        help='Path to config YAML (default: config/config.yaml)')
+    args = parser.parse_args()
+
+    config_stem = Path(args.config).stem
+    suffix = config_stem[len('config'):]
+
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -47,8 +56,9 @@ def main():
     logger.info("=" * 80)
     logger.info("WALK-FORWARD CROSS-VALIDATION WITH REGIME DETECTION")
     logger.info("=" * 80)
+    logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
 
-    with open('config/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
     # Load data
@@ -97,13 +107,11 @@ def main():
         )
         
         # Step 2: Extract regime features and add them to X_train and X_val
-        regime_features = ['regime_state', 'regime_prob_0', 'regime_prob_1', 'regime_prob_2']
-        
         # Align regime features with X_train and X_val indices
         X_train_r = X_train.copy()
         X_val_r = X_val.copy()
-        
-        for feat in regime_features:
+
+        for feat in REGIME_COLS:
             if feat in train_data_with_regime.columns:
                 X_train_r[feat] = train_data_with_regime.loc[X_train.index, feat]
             if feat in val_data_with_regime.columns:
@@ -136,13 +144,13 @@ def main():
         all_fold_results.append(fold_results)
         logger.info(f"Fold {fold_number} complete")
 
-    # Save results (evaluation will be done in backtest)
+    # Save results — used by run_rolling_oos_evaluation.py (quarterly backtest)
     logger.info("")
     logger.info("=" * 80)
     logger.info("SAVING RESULTS")
     logger.info("=" * 80)
 
-    output_path = Path('data/processed/walk_forward_results_regime.pkl')
+    output_path = Path(f'data/processed/walk_forward_results_regime{suffix}.pkl')
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'wb') as f:
@@ -156,10 +164,10 @@ def main():
     logger.info("WALK-FORWARD WITH REGIME DETECTION COMPLETE")
     logger.info("=" * 80)
     logger.info(f"Total folds: {len(all_fold_results)}")
-    logger.info(f"Models trained: LightGBM, EBM")
+    logger.info(f"Models trained: LightGBM")
     logger.info(f"Regime features: {len(REGIME_COLS)} columns added per fold")
     logger.info(f"Results saved: {output_path}")
-    logger.info(f"Note: Evaluation will be performed during backtesting")
+    logger.info(f"Next step: run_rolling_oos_evaluation.py (quarterly backtest, iteration 2)")
     logger.info("=" * 80)
 
 

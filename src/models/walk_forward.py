@@ -1,423 +1,507 @@
 """
 Walk-Forward Cross-Validation Module
+======================================
 
-Implements walk-forward validation for time series financial data.
-Supports both expanding and rolling window approaches.
+Implements rolling-window walk-forward CV for financial time series,
+enforcing strict no-look-ahead bias throughout.
+
+Rolling window schema (3-year train / 1-year val, config_2010.yaml)
+---------------------------------------------------------------------
+    Fold 1: train 2010–2013, val 2013–2014
+    Fold 2: train 2011–2014, val 2014–2015
+    Fold 3: train 2012–2015, val 2015–2016
+    Fold 4: train 2013–2016, val 2016–2017
+    Fold 5: train 2014–2017, val 2017–2018
+    Fold 6: train 2015–2018, val 2018–2019
+    Fold 7: train 2016–2019, val 2019–2020
+    OOS:    2020–2024  (never seen during training)
+
+No-look-ahead guarantees
+-------------------------
+1. Date filtering: end date is always exclusive — train and val windows
+   are strictly non-overlapping.
+2. IC feature selection: Spearman correlation computed on the training
+   slice only; the selected feature set is then applied to validation.
+3. Regime detection (RegimeDetector): fitted on training data only,
+   applied via transform to validation (handled in calling scripts).
+4. Expanding window: legacy branch — not used in production (raises
+   NotImplementedError if invoked).
 """
 
 from typing import Dict, Any, List, Tuple, Generator
+
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from scipy.stats import spearmanr
 from loguru import logger
+
+
+# Canonical 11-feature set used by all training scripts.
+# Order is fixed here — get_feature_names preserves this order regardless
+# of column order in the input DataFrame.
+TECHNICAL_FEATURES = [
+    'ret_5d', 'ret_21d',                                    # momentum
+    'vol_20d', 'atr_14',                                    # volatility
+    'rsi_14',                                               # oscillator
+    'macd_line', 'macd_signal', 'macd_hist',                # trend
+    'bb_pct', 'bb_width',                                   # bands
+    'volume_ratio',                                         # volume
+]
 
 
 class WalkForwardCV:
     """
-    Walk-forward cross-validation for time series data.
-    
-    Trains exclusively on SPY (S&P 500 ETF) using pure technical indicators
-    derived from price and volume data.
-    
-    Supports two window types:
-    
-    1. Rolling window (default):
-       - Fixed-size training window (e.g., 3 years)
-       - Slides forward by 1 year per fold
-       - Validation window follows training window (e.g., 1 year)
-       - No overlap between validation periods
-       
-       Example with 3-year train, 1-year val:
-           Fold 1: train 2008-2010, val 2011
-           Fold 2: train 2009-2011, val 2012
-           Fold 3: train 2010-2012, val 2013
-           ...
-    
-    2. Expanding window (legacy):
-       - Training set grows with each fold
-       - Validation window has fixed size
-       
-       Example with 8 splits and 1-year validation:
-           Fold 1: train 2008-2011, val 2012
-           Fold 2: train 2008-2012, val 2013
-           ...
-           Fold 8: train 2008-2019, val 2020
-    
-    Ensures no look-ahead bias in both modes.
-    
+    Rolling-window walk-forward cross-validation for time series data.
+
+    Each fold has a fixed-size training window that slides forward by one
+    year, followed by a non-overlapping validation window of the same step
+    size.  Feature selection (optional IC threshold) is applied per fold
+    using only the training slice.
+
     Attributes:
-        config (Dict[str, Any]): Configuration dictionary
+        config (Dict[str, Any]):     Full configuration dictionary.
+        train_start (pd.Timestamp):  First date of the first training fold.
+        train_end (pd.Timestamp):    Last date covered by walk-forward folds
+                                     (exclusive upper bound for val windows).
+        test_start (pd.Timestamp):   Start of the held-out OOS period.
+        test_end (pd.Timestamp):     End of the held-out OOS period.
+        window_type (str):           'rolling' (only supported value).
+        train_window_years (int):    Training window size in years.
+        val_window_years (int):      Validation window size in years.
+        label_column (str):          Target column name (default 'label_binary').
+        ic_threshold (float):        Minimum |IC| for feature selection (0 = all).
+        ic_min_features (int):       Minimum features to keep even if below threshold.
+        exclude_from_features (list): Columns always excluded from X.
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         """
-        Initialize WalkForwardCV.
-        
+        Initialise WalkForwardCV from the project configuration.
+
         Args:
-            config: Configuration dictionary with walk_forward parameters
+            config: Configuration dictionary.  Reads 'models.walk_forward'
+                    for date ranges, window parameters, and IC settings.
         """
         self.config = config
         models_config = config.get('models', {})
-        wf_config = models_config.get('walk_forward', {})
-        
-        # Date ranges
+        wf_config     = models_config.get('walk_forward', {})
+
         self.train_start = pd.to_datetime(wf_config.get('train_start', '2008-01-01'))
-        self.train_end = pd.to_datetime(wf_config.get('train_end', '2020-01-01'))
-        self.test_start = pd.to_datetime(wf_config.get('test_start', '2020-01-01'))
-        self.test_end = pd.to_datetime(wf_config.get('test_end', '2024-12-31'))
-        
-        # Walk-forward parameters
-        self.window_type = wf_config.get('window_type', 'rolling')
+        self.train_end   = pd.to_datetime(wf_config.get('train_end',   '2020-01-01'))
+        self.test_start  = pd.to_datetime(wf_config.get('test_start',  '2020-01-01'))
+        self.test_end    = pd.to_datetime(wf_config.get('test_end',    '2024-12-31'))
+
+        self.window_type        = wf_config.get('window_type', 'rolling')
         self.train_window_years = wf_config.get('train_window_years', 3)
-        self.val_window_years = wf_config.get('val_window_years', 1)
-        
-        # Feature exclusions
+        self.val_window_years   = wf_config.get('val_window_years', 1)
+
         self.exclude_from_features = models_config.get('exclude_from_features', [
             'Close', 'High', 'Low', 'Open', 'Volume',
-            'label', 'label_binary'
+            'label', 'label_binary',
         ])
-        
-        logger.info("WalkForwardCV initialized")
-        logger.info(f"Window type: {self.window_type}")
-        logger.info(f"Training period: {self.train_start.date()} to {self.train_end.date()}")
-        logger.info(f"Test period: {self.test_start.date()} to {self.test_end.date()}")
-        if self.window_type == 'rolling':
-            logger.info(f"Training window: {self.train_window_years} year(s)")
-        logger.info(f"Validation window: {self.val_window_years} year(s)")
-    
+
+        self.label_column   = wf_config.get('label_column', 'label_binary')
+        self.ic_threshold   = wf_config.get('ic_threshold', 0.0)
+        self.ic_min_features = wf_config.get('ic_min_features', 6)
+
+        logger.info("WalkForwardCV initialised")
+        logger.info(
+            f"Window: {self.window_type}  |  "
+            f"train={self.train_window_years}yr  |  "
+            f"val={self.val_window_years}yr"
+        )
+        logger.info(
+            f"WF period: {self.train_start.date()} → {self.train_end.date()}  |  "
+            f"OOS: {self.test_start.date()} → {self.test_end.date()}"
+        )
+        logger.info(
+            f"Label: {self.label_column}  |  "
+            f"IC threshold: {self.ic_threshold}  |  "
+            f"IC min features: {self.ic_min_features}"
+        )
+
+    # ------------------------------------------------------------------
+    # Feature selection
+    # ------------------------------------------------------------------
+
     def get_feature_names(self, data: pd.DataFrame) -> List[str]:
         """
-        Get list of feature column names.
-        
-        Excludes OHLCV, labels, and all external market variables (VIX, oil).
-        Keeps only the 16 pure technical features derived from price and volume.
-        
+        Return the active feature columns in canonical order.
+
+        Iterates over the module-level ``TECHNICAL_FEATURES`` list (not over
+        ``data.columns``) so that the returned order is always identical
+        regardless of column ordering in the input DataFrame.  Consistent
+        feature order is required for reproducible SHAP values and for
+        correct alignment between SHAP arrays and feature name lists.
+
+        VIX, sma_200_dist, ret_1d, and all FRED-derived columns are excluded:
+        - ``vix``: used by RegimeDetector only, not in model X.
+        - ``sma_200_dist``: not in the tutor-approved 11-feature set.
+        - ``ret_1d``: IC too low; intermediate for vol_20d only.
+
         Args:
-            data: DataFrame with all columns
-            
+            data: DataFrame whose columns are checked for availability.
+
         Returns:
-            List of feature column names (16 technical features)
+            Ordered list of feature column names (subset of TECHNICAL_FEATURES).
         """
-        # Define the 16 pure technical features to KEEP
-        # Excludes VIX and oil - these are used for GMM regime detection only
-        TECHNICAL_FEATURES = [
-            # Returns (3)
-            'ret_1d', 'ret_5d', 'ret_21d',
-            # Volatility (2)
-            'vol_20d', 'atr_14',
-            # Technical indicators (10)
-            'rsi_14', 'macd_line', 'macd_signal', 'macd_hist',
-            'bb_mid', 'bb_upper', 'bb_lower', 'bb_pct', 'bb_width',
-            'volume_ratio',
-            # Trend context (1)
-            'sma_200_dist'
-        ]
-        
-        all_columns = data.columns.tolist()
-        
-        # Keep only technical features that exist in the data
-        feature_columns = [
-            col for col in all_columns 
-            if col in TECHNICAL_FEATURES
-        ]
-        
-        logger.debug(f"Total columns: {len(all_columns)}")
-        logger.debug(f"Technical feature columns: {len(feature_columns)}")
-        logger.debug(f"Features: {feature_columns}")
-        
+        # Canonical order: iterate TECHNICAL_FEATURES, not data.columns
+        feature_columns = [col for col in TECHNICAL_FEATURES if col in data.columns]
+
+        missing = [col for col in TECHNICAL_FEATURES if col not in data.columns]
+        if missing:
+            logger.warning(f"Features missing from data: {missing}")
+
+        logger.debug(f"Active features ({len(feature_columns)}): {feature_columns}")
         return feature_columns
-    
+
+    def _select_features_by_ic(
+        self,
+        data: pd.DataFrame,
+        feature_columns: List[str],
+    ) -> List[str]:
+        """
+        Filter features by Information Coefficient (Spearman |IC| with
+        ret_10d_forward) computed on the training slice only.
+
+        IC target: ``ret_10d_forward`` (continuous 10-day forward return) is
+        used instead of binary ``label_binary`` because Spearman correlation
+        with a continuous target is more discriminative than with a ±1 label.
+        The 10-day horizon matches the triple-barrier max_holding_period.
+
+        Only training data is passed in — no look-ahead bias.
+
+        If ``ic_threshold == 0.0`` (default) every feature has |IC| ≥ 0,
+        so all features pass and this method is a no-op (gated by the caller).
+
+        Args:
+            data:            Training slice (full DataFrame, before NaN removal).
+            feature_columns: Candidate feature names in canonical order.
+
+        Returns:
+            Filtered list of feature names with |IC| ≥ ic_threshold, or the
+            top ic_min_features if fewer pass the threshold.
+        """
+        target_col = 'ret_10d_forward'
+
+        if target_col not in data.columns:
+            logger.warning(
+                f"'{target_col}' not found in data — IC selection skipped"
+            )
+            return feature_columns
+
+        mask  = data[target_col].notna() & data[feature_columns].notna().all(axis=1)
+        valid = data[mask]
+
+        if len(valid) < 50:
+            logger.warning(
+                f"Too few valid rows ({len(valid)}) for IC selection — skipped"
+            )
+            return feature_columns
+
+        target    = valid[target_col]
+        ic_scores = {}
+        for feat in feature_columns:
+            corr, _ = spearmanr(valid[feat], target)
+            ic_scores[feat] = abs(corr) if not np.isnan(corr) else 0.0
+
+        selected = [f for f in feature_columns if ic_scores[f] >= self.ic_threshold]
+
+        if len(selected) < self.ic_min_features:
+            selected = sorted(
+                feature_columns, key=lambda f: ic_scores[f], reverse=True
+            )[:self.ic_min_features]
+
+        logger.info(
+            f"IC selection: {len(selected)}/{len(feature_columns)} features kept "
+            f"(threshold={self.ic_threshold})"
+        )
+        for feat in sorted(feature_columns, key=lambda f: ic_scores[f], reverse=True):
+            marker = "OK" if feat in selected else "  "
+            logger.info(f"  [{marker}] {feat}: IC={ic_scores[feat]:.4f}")
+
+        return selected
+
+    # ------------------------------------------------------------------
+    # Date helpers
+    # ------------------------------------------------------------------
+
     def _filter_by_date(
-        self, 
-        data: pd.DataFrame, 
-        start_date: pd.Timestamp, 
-        end_date: pd.Timestamp
+        self,
+        data: pd.DataFrame,
+        start_date: pd.Timestamp,
+        end_date: pd.Timestamp,
     ) -> pd.DataFrame:
         """
-        Filter DataFrame by date range.
-        
+        Return rows where start_date <= date < end_date (end is exclusive).
+
+        The exclusive end means train_end == val_start produces zero overlap
+        between consecutive windows — the no-look-ahead guarantee.
+
         Args:
-            data: DataFrame with MultiIndex (ticker, date)
-            start_date: Start date (inclusive)
-            end_date: End date (exclusive)
-            
+            data:       MultiIndex (ticker, date) DataFrame.
+            start_date: Inclusive lower bound.
+            end_date:   Exclusive upper bound.
+
         Returns:
-            Filtered DataFrame
+            Filtered copy of data.
         """
-        # Get date level from MultiIndex
         dates = data.index.get_level_values('date')
-        
-        # Filter by date range
-        mask = (dates >= start_date) & (dates < end_date)
-        filtered = data[mask].copy()
-        
-        return filtered
-    
-    def _prepare_xy(
-        self, 
-        data: pd.DataFrame, 
-        feature_columns: List[str]
-    ) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        Prepare X (features) and y (target) from data.
-        
-        Removes rows with NaN in target or features.
-        
-        Args:
-            data: DataFrame with features and target
-            feature_columns: List of feature column names
-            
-        Returns:
-            Tuple of (X, y) with NaN rows removed
-        """
-        # Extract features and target
-        X = data[feature_columns].copy()
-        y = data['label_binary'].copy()
-        
-        # Remove rows where target is NaN (label_binary NaN = label 0)
-        valid_mask = y.notna()
-        X = X[valid_mask]
-        y = y[valid_mask]
-        
-        # Remove rows where any feature is NaN
-        valid_mask = X.notna().all(axis=1)
-        X = X[valid_mask]
-        y = y[valid_mask]
-        
-        return X, y
-    
+        return data[(dates >= start_date) & (dates < end_date)].copy()
+
     def _get_fold_dates(self) -> List[Dict[str, pd.Timestamp]]:
         """
-        Calculate date ranges for each fold.
-        
-        For rolling window: fixed-size training window slides forward by 1 year per fold
-        For expanding window: training window grows with each fold
-        
+        Compute train/val date ranges for each walk-forward fold.
+
+        Rolling window only: training window of fixed size slides forward
+        by ``val_window_years`` per fold.  Generation stops when the
+        validation window would exceed ``train_end``.
+
         Returns:
-            List of dictionaries with train/val date ranges
+            List of dicts with keys: fold, train_start, train_end,
+            val_start, val_end.
+
+        Raises:
+            NotImplementedError: If window_type is not 'rolling'.
         """
-        folds = []
-        
-        if self.window_type == 'rolling':
-            # Rolling window: fixed training window size, slides forward by 1 year
-            fold_num = 1
-            current_train_start = self.train_start
-            
-            while True:
-                train_end = current_train_start + pd.DateOffset(years=self.train_window_years)
-                val_start = train_end
-                val_end = val_start + pd.DateOffset(years=self.val_window_years)
-                
-                # Stop if validation window exceeds train_end
-                if val_end > self.train_end:
-                    break
-                
-                folds.append({
-                    'fold': fold_num,
-                    'train_start': current_train_start,
-                    'train_end': train_end,
-                    'val_start': val_start,
-                    'val_end': val_end
-                })
-                
-                # Slide window forward by 1 year
-                current_train_start += pd.DateOffset(years=1)
-                fold_num += 1
-            
-        else:
-            # Expanding window: training grows with each fold (legacy behavior)
-            total_days = (self.train_end - self.train_start).days
-            val_days = int(self.val_window_years * 365)
-            
-            available_days = total_days - val_days
-            step_days = available_days // (self.n_splits - 1)
-            
-            for i in range(self.n_splits):
-                val_start = self.train_start + pd.Timedelta(days=step_days * i + val_days)
-                val_end = val_start + pd.Timedelta(days=val_days)
-                
-                # Last fold ends in train_end
-                if i == self.n_splits - 1:
-                    val_end = self.train_end
-                    val_start = val_end - pd.Timedelta(days=val_days)
-                
-                folds.append({
-                    'fold': i + 1,
-                    'train_start': self.train_start,
-                    'train_end': val_start,
-                    'val_start': val_start,
-                    'val_end': val_end
-                })
-        
+        if self.window_type != 'rolling':
+            raise NotImplementedError(
+                f"window_type='{self.window_type}' is not supported.  "
+                "Only 'rolling' is validated and used in production.  "
+                "The expanding window branch was removed because "
+                "self.n_splits was never set in __init__."
+            )
+
+        folds: List[Dict[str, pd.Timestamp]] = []
+        fold_num            = 1
+        current_train_start = self.train_start
+
+        while True:
+            train_end = current_train_start + pd.DateOffset(years=self.train_window_years)
+            val_start = train_end
+            val_end   = val_start + pd.DateOffset(years=self.val_window_years)
+
+            if val_end > self.train_end:
+                break
+
+            folds.append({
+                'fold':        fold_num,
+                'train_start': current_train_start,
+                'train_end':   train_end,
+                'val_start':   val_start,
+                'val_end':     val_end,
+            })
+
+            current_train_start += pd.DateOffset(years=self.val_window_years)
+            fold_num += 1
+
         return folds
-    
+
+    # ------------------------------------------------------------------
+    # Data preparation
+    # ------------------------------------------------------------------
+
+    def _prepare_xy(
+        self,
+        data: pd.DataFrame,
+        feature_columns: List[str],
+    ) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Extract X and y, dropping rows where either is NaN.
+
+        NaN rows arise from two sources:
+        - EWM warmup: first row(s) of vol_20d are NaN.
+        - Near-end rows: last rows of ret_10d_forward / label_binary are NaN
+          because no future data exists within max_holding_period.
+
+        Both target-NaN and feature-NaN rows are dropped in a single pass
+        to avoid redundant mask computation.
+
+        Args:
+            data:            Filtered DataFrame (single fold window).
+            feature_columns: Ordered feature column names.
+
+        Returns:
+            (X, y) with the same index (MultiIndex preserved for backtest
+            alignment).
+        """
+        X = data[feature_columns]
+        y = data[self.label_column]
+
+        valid_mask = y.notna() & X.notna().all(axis=1)
+        return X[valid_mask].copy(), y[valid_mask].copy()
+
+    # ------------------------------------------------------------------
+    # Main interface
+    # ------------------------------------------------------------------
+
     def split(
-        self, 
-        data: pd.DataFrame
+        self,
+        data: pd.DataFrame,
     ) -> Generator[Dict[str, Any], None, None]:
         """
         Generate train/validation splits for walk-forward CV.
-        
+
+        At each fold:
+        1. Date windows are computed by ``_get_fold_dates()``.
+        2. Optional IC-based feature selection on the training slice.
+        3. NaN rows are removed from both sets.
+        4. The full (unfiltered) DataFrames are also yielded as
+           ``train_data_full`` / ``val_data_full`` for use by the
+           RegimeDetector (which needs 'vix' and 'ret_1d', absent from X).
+
+        Yielded dict keys
+        -----------------
+        fold_number, train_start, train_end, val_start, val_end,
+        X_train, y_train, X_val, y_val,
+        train_dates, val_dates, feature_names,
+        train_data_full, val_data_full
+
         Args:
-            data: DataFrame with MultiIndex (ticker, date) and all columns
-            
+            data: MultiIndex (ticker, date) DataFrame from
+                  ``DataLoader.load_engineered_features()``.
+
         Yields:
-            Dictionary with fold information and data splits
+            One dict per fold.
         """
         logger.info("=" * 80)
-        logger.info("WALK-FORWARD CROSS-VALIDATION SPLITS")
+        logger.info("WALK-FORWARD CROSS-VALIDATION")
         logger.info("=" * 80)
-        
-        # Get feature columns
-        feature_columns = self.get_feature_names(data)
-        logger.info(f"Using {len(feature_columns)} features")
-        
-        # Get fold date ranges
-        fold_dates = self._get_fold_dates()
+
+        base_features = self.get_feature_names(data)
+        logger.info(f"Base features ({len(base_features)}): {base_features}")
+
+        fold_dates  = self._get_fold_dates()
         total_folds = len(fold_dates)
-        
-        # Generate each fold
+        logger.info(f"Total folds: {total_folds}")
+
         for fold_info in fold_dates:
             fold_num = fold_info['fold']
-            
+
             logger.info("")
-            logger.info("=" * 80)
-            logger.info(f"FOLD {fold_num}/{total_folds}")
-            logger.info("=" * 80)
-            
-            # Filter data by date ranges
+            logger.info(f"FOLD {fold_num}/{total_folds}  "
+                        f"train {fold_info['train_start'].date()} → "
+                        f"{fold_info['train_end'].date()}  |  "
+                        f"val {fold_info['val_start'].date()} → "
+                        f"{fold_info['val_end'].date()}")
+
             train_data = self._filter_by_date(
-                data, 
-                fold_info['train_start'], 
-                fold_info['train_end']
+                data, fold_info['train_start'], fold_info['train_end']
             )
-            
             val_data = self._filter_by_date(
-                data,
-                fold_info['val_start'],
-                fold_info['val_end']
+                data, fold_info['val_start'], fold_info['val_end']
             )
-            
-            logger.info(f"Train period: {fold_info['train_start'].date()} to {fold_info['train_end'].date()}")
-            logger.info(f"Val period: {fold_info['val_start'].date()} to {fold_info['val_end'].date()}")
-            logger.info(f"Train rows (before cleaning): {len(train_data)}")
-            logger.info(f"Val rows (before cleaning): {len(val_data)}")
-            
-            # Prepare X, y
+
+            # IC feature selection on training slice only (no look-ahead)
+            feature_columns = (
+                self._select_features_by_ic(train_data, base_features)
+                if self.ic_threshold > 0.0
+                else base_features
+            )
+
             X_train, y_train = self._prepare_xy(train_data, feature_columns)
-            X_val, y_val = self._prepare_xy(val_data, feature_columns)
-            
-            logger.info(f"Train rows (after cleaning): {len(X_train)}")
-            logger.info(f"Val rows (after cleaning): {len(X_val)}")
-            
-            # Log label distribution
-            if len(y_train) > 0:
-                train_dist = y_train.value_counts().sort_index()
-                logger.info("Train label distribution:")
-                for label, count in train_dist.items():
-                    pct = (count / len(y_train)) * 100
-                    logger.info(f"  Label {int(label):2d}: {count:5d} ({pct:5.2f}%)")
-            
-            if len(y_val) > 0:
-                val_dist = y_val.value_counts().sort_index()
-                logger.info("Val label distribution:")
-                for label, count in val_dist.items():
-                    pct = (count / len(y_val)) * 100
-                    logger.info(f"  Label {int(label):2d}: {count:5d} ({pct:5.2f}%)")
-            
-            # Yield fold data
-            # Also include full DataFrames (train_data_full, val_data_full) for regime detection
+            X_val,   y_val   = self._prepare_xy(val_data,   feature_columns)
+
+            logger.info(
+                f"  Train: {len(X_train)} rows  |  "
+                f"Val: {len(X_val)} rows  |  "
+                f"Features: {len(feature_columns)}"
+            )
+
+            # Label distribution (quick sanity check)
+            for split_name, y in [('train', y_train), ('val', y_val)]:
+                if len(y) > 0:
+                    dist = y.value_counts().sort_index()
+                    parts = "  ".join(
+                        f"label {int(lbl):+d}: {cnt} ({cnt/len(y)*100:.1f}%)"
+                        for lbl, cnt in dist.items()
+                    )
+                    logger.info(f"  {split_name} labels — {parts}")
+
             yield {
-                'fold_number': fold_num,
-                'train_start': fold_info['train_start'],
-                'train_end': fold_info['train_end'],
-                'val_start': fold_info['val_start'],
-                'val_end': fold_info['val_end'],
-                'X_train': X_train,
-                'y_train': y_train,
-                'X_val': X_val,
-                'y_val': y_val,
-                'train_dates': X_train.index.get_level_values('date'),
-                'val_dates': X_val.index.get_level_values('date'),
-                'feature_names': feature_columns,
-                'train_data_full': train_data,  # Full DataFrame with all columns including vix
-                'val_data_full': val_data  # Full DataFrame with all columns including vix
+                'fold_number':    fold_num,
+                'train_start':    fold_info['train_start'],
+                'train_end':      fold_info['train_end'],
+                'val_start':      fold_info['val_start'],
+                'val_end':        fold_info['val_end'],
+                'X_train':        X_train,
+                'y_train':        y_train,
+                'X_val':          X_val,
+                'y_val':          y_val,
+                'train_dates':    X_train.index.get_level_values('date'),
+                'val_dates':      X_val.index.get_level_values('date'),
+                'feature_names':  feature_columns,
+                'train_data_full': train_data,   # includes vix, ret_1d for RegimeDetector
+                'val_data_full':   val_data,
             }
-        
+
         logger.info("")
         logger.info("=" * 80)
-        logger.info("WALK-FORWARD CV COMPLETE")
+        logger.success(f"WALK-FORWARD CV COMPLETE  |  {total_folds} folds")
         logger.info("=" * 80)
-    
+
     def get_oos_data(
-        self, 
-        data: pd.DataFrame
+        self,
+        data: pd.DataFrame,
     ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
         """
-        Get out-of-sample test data for final evaluation.
-        
+        Extract the held-out OOS test set (never seen during training).
+
         Args:
-            data: DataFrame with MultiIndex (ticker, date) and all columns
-            
+            data: MultiIndex (ticker, date) DataFrame.
+
         Returns:
-            Tuple of (X_test, y_test, feature_names)
+            Tuple (X_test, y_test, feature_names) with NaN rows removed.
         """
         logger.info("=" * 80)
-        logger.info("OUT-OF-SAMPLE TEST DATA")
-        logger.info("=" * 80)
-        logger.info(f"Test period: {self.test_start.date()} to {self.test_end.date()}")
-        
-        # Get feature columns
+        logger.info(
+            f"OOS TEST DATA  |  "
+            f"{self.test_start.date()} → {self.test_end.date()}"
+        )
+
         feature_columns = self.get_feature_names(data)
-        
-        # Filter test data
-        test_data = self._filter_by_date(data, self.test_start, self.test_end)
-        logger.info(f"Test rows (before cleaning): {len(test_data)}")
-        
-        # Prepare X, y
-        X_test, y_test = self._prepare_xy(test_data, feature_columns)
-        logger.info(f"Test rows (after cleaning): {len(X_test)}")
-        
-        # Log label distribution
+        test_data       = self._filter_by_date(data, self.test_start, self.test_end)
+        X_test, y_test  = self._prepare_xy(test_data, feature_columns)
+
+        logger.info(f"OOS rows: {len(X_test)}  |  features: {len(feature_columns)}")
+
         if len(y_test) > 0:
-            test_dist = y_test.value_counts().sort_index()
-            logger.info("Test label distribution:")
-            for label, count in test_dist.items():
-                pct = (count / len(y_test)) * 100
-                logger.info(f"  Label {int(label):2d}: {count:5d} ({pct:5.2f}%)")
-        
+            dist  = y_test.value_counts().sort_index()
+            parts = "  ".join(
+                f"label {int(lbl):+d}: {cnt} ({cnt/len(y_test)*100:.1f}%)"
+                for lbl, cnt in dist.items()
+            )
+            logger.info(f"OOS labels — {parts}")
+
         logger.info("=" * 80)
-        
         return X_test, y_test, feature_columns
-    
+
     def get_summary(self) -> Dict[str, Any]:
         """
-        Get summary of walk-forward configuration.
-        
+        Return a serialisable summary of the walk-forward configuration.
+
         Returns:
-            Dictionary with configuration summary
+            Dict with window type, date ranges, fold count, and per-fold dates.
         """
         fold_dates = self._get_fold_dates()
-        
-        summary = {
-            'window_type': self.window_type,
-            'train_start': self.train_start.strftime('%Y-%m-%d'),
-            'train_end': self.train_end.strftime('%Y-%m-%d'),
-            'test_start': self.test_start.strftime('%Y-%m-%d'),
-            'test_end': self.test_end.strftime('%Y-%m-%d'),
-            'n_splits': len(fold_dates),
-            'train_window_years': self.train_window_years if self.window_type == 'rolling' else None,
-            'val_window_years': self.val_window_years,
+
+        return {
+            'window_type':        self.window_type,
+            'train_start':        self.train_start.strftime('%Y-%m-%d'),
+            'train_end':          self.train_end.strftime('%Y-%m-%d'),
+            'test_start':         self.test_start.strftime('%Y-%m-%d'),
+            'test_end':           self.test_end.strftime('%Y-%m-%d'),
+            'n_splits':           len(fold_dates),
+            'train_window_years': self.train_window_years,
+            'val_window_years':   self.val_window_years,
             'folds': [
                 {
-                    'fold': f['fold'],
+                    'fold':        f['fold'],
                     'train_start': f['train_start'].strftime('%Y-%m-%d'),
-                    'train_end': f['train_end'].strftime('%Y-%m-%d'),
-                    'val_start': f['val_start'].strftime('%Y-%m-%d'),
-                    'val_end': f['val_end'].strftime('%Y-%m-%d')
+                    'train_end':   f['train_end'].strftime('%Y-%m-%d'),
+                    'val_start':   f['val_start'].strftime('%Y-%m-%d'),
+                    'val_end':     f['val_end'].strftime('%Y-%m-%d'),
                 }
                 for f in fold_dates
-            ]
+            ],
         }
-        
-        return summary

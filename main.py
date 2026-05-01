@@ -2,11 +2,13 @@
 Main Entry Point for Data Ingestion and Feature Engineering Pipeline
 
 Orchestrates the full data preparation pipeline:
-1. Download market data from yfinance (SPY, USO)
-2. Download macroeconomic data from FRED (15 series)
+1. Download market data from yfinance (SPY, 2004-2024)
+2. Download macroeconomic data from FRED (VIX / VIXCLS)
 3. Align yfinance and FRED data via inner join on trading dates
 4. Save raw aligned data to HDF5
-5. Calculate technical features (momentum, volatility, RSI, MACD, Bollinger, ATR, volume)
+5. Calculate 11 stationary technical features (momentum, volatility, RSI,
+   normalized MACD, Bollinger %B and width, normalized ATR%, volume ratio,
+   trend distance)
 6. Apply triple barrier labeling (ternary label + binary collapse)
 7. Save final labeled dataset to HDF5
 
@@ -181,7 +183,7 @@ def main() -> int:
         loader.validate_hdf5_data()
 
         # ------------------------------------------------------------------
-        # Step 5: Alignment summary
+        # Alignment summary (informational, not a pipeline step)
         # ------------------------------------------------------------------
         logger.info("")
         summary = aligner.get_alignment_summary(yfinance_data, fred_data, aligned_data)
@@ -194,26 +196,26 @@ def main() -> int:
         logger.info(f"Total columns: {len(aligned_data.columns)}")
 
         # ------------------------------------------------------------------
-        # Step 6: Feature engineering
+        # Step 5: Feature engineering
         # ------------------------------------------------------------------
         logger.info("")
         logger.info("=" * 80)
-        logger.info("STEP 6: FEATURE ENGINEERING")
+        logger.info("STEP 5: FEATURE ENGINEERING")
         logger.info("=" * 80)
 
         engineer = FeatureEngineer(config)
         featured_data = engineer.engineer_features(aligned_data)
 
         feature_summary = engineer.get_feature_summary(featured_data)
-        logger.info(f"Technical features added: {feature_summary['feature_columns']}")
+        logger.info(f"Technical features added: {feature_summary['active_feature_count']}")
         logger.info(f"Total columns: {feature_summary['total_columns']}")
 
         # ------------------------------------------------------------------
-        # Step 7: Triple barrier labeling
+        # Step 6: Triple barrier labeling
         # ------------------------------------------------------------------
         logger.info("")
         logger.info("=" * 80)
-        logger.info("STEP 7: TRIPLE BARRIER LABELING")
+        logger.info("STEP 6: TRIPLE BARRIER LABELING")
         logger.info("=" * 80)
 
         labeler = TripleBarrierLabeler(config)
@@ -226,11 +228,11 @@ def main() -> int:
         logger.info(f"Missing labels:          {label_summary['missing_labels']}")
 
         # ------------------------------------------------------------------
-        # Step 8: Save engineered features to HDF5
+        # Step 7: Save engineered features to HDF5
         # ------------------------------------------------------------------
         logger.info("")
         logger.info("=" * 80)
-        logger.info("STEP 8: SAVING ENGINEERED FEATURES TO HDF5")
+        logger.info("STEP 7: SAVING ENGINEERED FEATURES TO HDF5")
         logger.info("=" * 80)
 
         loader.save_to_hdf5(
@@ -244,11 +246,11 @@ def main() -> int:
         )
 
         # ------------------------------------------------------------------
-        # Step 9: Final verification
+        # Step 8: Final verification
         # ------------------------------------------------------------------
         logger.info("")
         logger.info("=" * 80)
-        logger.info("STEP 9: FINAL VERIFICATION")
+        logger.info("STEP 8: FINAL VERIFICATION")
         logger.info("=" * 80)
 
         all_keys = loader.list_hdf5_keys()
@@ -277,11 +279,12 @@ def main() -> int:
         logger.info(f"Keys:          {all_keys}")
         logger.info(f"Final shape:   {labeled_data.shape}")
         logger.info(
-            f"Features:      {feature_summary['feature_columns']} technical indicators"
+            f"Features:      {feature_summary['active_feature_count']} stationary "
+            f"technical indicators (11 baseline)"
         )
         logger.info(
             "Labels:        label (ternary: 1/-1/0) and "
-            "label_binary (binary: 1/-1)"
+            "label_binary (binary: 1/-1 → converted to 0/1 at training)"
         )
         logger.info("=" * 80)
 

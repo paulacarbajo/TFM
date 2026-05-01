@@ -26,6 +26,7 @@ EBM Distillation Training:
 Results saved to data/processed/walk_forward_distillation_results.pkl
 """
 
+import argparse
 import warnings
 import yaml
 import pickle
@@ -93,12 +94,12 @@ def train_ebm_distilled(X_train, soft_labels, config, fold_number, temperature):
     ebm_config = config.get('models', {}).get('ebm', {})
     
     model = ExplainableBoostingClassifier(
-        max_bins=ebm_config.get('max_bins', 256),
+        max_bins=ebm_config.get('max_bins', 128),
         max_interaction_bins=ebm_config.get('max_interaction_bins', 32),
         interactions=ebm_config.get('interactions', 10),
         learning_rate=ebm_config.get('learning_rate', 0.01),
         max_rounds=ebm_config.get('max_rounds', 5000),
-        min_samples_leaf=ebm_config.get('min_samples_leaf', 2),
+        min_samples_leaf=ebm_config.get('min_samples_leaf', 10),
         random_state=ebm_config.get('random_state', 42)
     )
     
@@ -149,7 +150,10 @@ def process_fold(fold_data, config, trainer, temperatures):
     # Step 1: Train LightGBM teacher on hard labels
     logger.info("\n--- STEP 1: Training LightGBM Teacher ---")
     lightgbm_model = trainer._train_lightgbm(X_train_clean, y_train_binary, fold_number)
-    
+
+    if lightgbm_model is None:
+        raise RuntimeError(f"LightGBM training failed for fold {fold_number} — cannot distil")
+
     # Evaluate teacher on validation set
     lgbm_val_pred = lightgbm_model.predict(X_val_clean)
     lgbm_val_accuracy = accuracy_score(y_val_binary, lgbm_val_pred)
@@ -262,23 +266,32 @@ def select_best_temperature(all_fold_results, temperatures):
 
 def main():
     """Run walk-forward cross-validation with knowledge distillation."""
+    parser = argparse.ArgumentParser(description='Walk-forward CV with knowledge distillation')
+    parser.add_argument('--config', default='config/config.yaml',
+                        help='Path to config YAML (default: config/config.yaml)')
+    args = parser.parse_args()
+
+    config_stem = Path(args.config).stem
+    suffix = config_stem[len('config'):]
+
     logger.add(
         "logs/walk_forward_distillation_{time:YYYY-MM-DD}.log",
         rotation="1 day",
         retention="7 days",
         level="DEBUG"
     )
-    
+
     logger.info("=" * 80)
     logger.info("WALK-FORWARD CROSS-VALIDATION WITH KNOWLEDGE DISTILLATION")
     logger.info("=" * 80)
     logger.info("Teacher: LightGBM (trained on hard labels)")
     logger.info("Student: EBM (trained on soft labels with temperature)")
     logger.info("Temperature search: T in {1, 2, 3, 4}")
+    logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
     logger.info("=" * 80)
-    
+
     # Load configuration
-    with open('config/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
     # Load data
@@ -315,7 +328,7 @@ def main():
     logger.info("SAVING RESULTS")
     logger.info("=" * 80)
     
-    output_path = Path('data/processed/walk_forward_distillation_results.pkl')
+    output_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
     results = {

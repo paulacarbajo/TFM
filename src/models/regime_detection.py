@@ -1,13 +1,79 @@
 """
 Regime Detection Module
+========================
 
-Detects market regimes using Gaussian Mixture Models (GMM).
-Follows strict no-look-ahead principle: the GMM is retrained on each fold's
-training data and applied in inference mode on validation data.
+Classifies market regimes using a Gaussian Mixture Model (GMM) fitted on
+three market-state descriptors: daily return, realized volatility, and VIX.
 
-Regime information is added as additional features to the existing feature set,
-allowing the classification models to condition their predictions on the current
-market regime without training separate models per regime.
+Role in the pipeline
+--------------------
+The RegimeDetector is called inside the walk-forward loop by
+``run_walk_forward_regime.py`` and ``run_walk_forward_distillation.py``.
+At each fold boundary it:
+
+    1. Fits a GMM on the fold's **training** data only.
+    2. Assigns regime labels and probabilities to the **training** set.
+    3. Assigns regime labels and probabilities to the **validation** set
+       using the already-fitted model (no re-fitting on validation data).
+    4. Appends four columns to both sets:
+           regime_state   — integer ∈ {0, 1, 2}, ordered by volatility
+           regime_prob_0  — posterior probability of the low-vol regime
+           regime_prob_1  — posterior probability of the medium-vol regime
+           regime_prob_2  — posterior probability of the high-vol regime
+
+These four columns enter the feature matrix X of LightGBM (and the
+knowledge-distilled EBM and RuleFit derived from it), allowing the models
+to condition their predictions on the prevailing market environment.
+
+Why GMM?
+---------
+- **Soft assignment**: unlike k-means, GMM assigns a probability to each
+  regime, not just a hard label.  The three ``regime_prob_*`` columns give
+  the model a continuous, differentiable signal about regime uncertainty.
+- **Elliptical clusters**: ``covariance_type='full'`` allows the GMM to
+  model elongated, correlated clusters.  Market regimes have very different
+  shapes in (ret_1d, vol_20d, vix) space: a crisis regime has high values on
+  all three axes but also high variance, while a bull regime is compact.
+- **Interpretability**: the three components map naturally to the three market
+  states that practitioners recognise: Bull (low vol, positive return), Neutral
+  (medium vol, mixed return), Bear/Crisis (high vol, negative return).
+
+Why 3 components?
+------------------
+Three components is the minimum that separates the three qualitatively
+distinct market environments.  Fewer components conflate Bull and Neutral;
+more components produce unstable micro-regimes that are hard to interpret
+and prone to fold-to-fold inconsistency.
+
+Why these three features: (ret_1d, vol_20d, vix)?
+---------------------------------------------------
+- ``ret_1d``   — captures the sign of the current daily move; distinguishes
+  strongly trending markets from range-bound ones within the same vol level.
+- ``vol_20d``  — realized volatility (EWM span=20); measures the current
+  volatility regime from price history alone.
+- ``vix``      — implied volatility; the market's forward-looking fear gauge.
+  High VIX can precede a realized volatility spike by days, giving the GMM an
+  early-warning signal not captured by backward-looking vol_20d alone.
+
+VIX is excluded from the model feature matrix X to avoid multicollinearity
+with vol_20d and to keep the 11-feature set interpretable.  It is used here,
+in the GMM, precisely because it adds orthogonal information to vol_20d.
+
+Why StandardScaler?
+--------------------
+ret_1d (order of magnitude 1e-2), vol_20d (1e-2), and vix (10–80) are on
+very different scales.  Without scaling, the GMM distance metric would be
+dominated by vix, effectively ignoring the return and volatility signals.
+StandardScaler is fitted on training data and applied to validation data
+using the training statistics — consistent with the no-look-ahead principle.
+
+No-look-ahead guarantee
+------------------------
+The GMM is re-fitted at every fold boundary using only the fold's training
+window.  The scaler is also re-fitted at each fold.  Validation data is
+processed with ``scaler.transform`` (not ``fit_transform``) and
+``model.predict`` (not ``model.fit_predict``), ensuring zero information
+from the validation period leaks into the regime assignments.
 """
 
 from typing import Dict, Any, Optional, Tuple
@@ -20,74 +86,97 @@ from sklearn.preprocessing import StandardScaler
 
 class RegimeDetector:
     """
-    Detects market regimes using a Gaussian Mixture Model (GMM).
+    Detects market regimes using a 3-component Gaussian Mixture Model.
 
-    A GMM with three components is fitted on three features that capture
-    the prevailing market environment: daily return, 20-day EWM volatility,
-    and the VIX index. The three resulting regimes are ordered by their mean
-    volatility level, so that regime 0 consistently corresponds to low-volatility
-    conditions, regime 1 to intermediate conditions, and regime 2 to crisis or
-    high-volatility periods.
+    Fitted exclusively on fold training data; applied to validation data
+    using the stored scaler and GMM (no look-ahead).  Regimes are
+    volatility-ordered so that regime 0 = Bull (low vol), regime 1 =
+    Neutral (medium vol), regime 2 = Bear/Crisis (high vol), consistently
+    across all folds regardless of the GMM's arbitrary initialization.
 
-    The GMM is fitted exclusively on training data at each walk-forward fold
-    boundary. Regime labels and probabilities are then assigned to both the
-    training and validation sets using the fitted model, ensuring no look-ahead
-    bias is introduced.
+    GMM inputs (3 features):
+        ret_1d, vol_20d, vix
+        (VIX is used here only; it is excluded from the model's feature
+        matrix X to avoid multicollinearity with vol_20d.)
 
-    The output of this module — regime state and per-regime probabilities — is
-    appended to the feature matrix as additional columns, allowing LightGBM and
-    EBM to condition their predictions on the current market regime.
+    GMM outputs appended to X:
+        regime_state (int ∈ {0,1,2}), regime_prob_0, regime_prob_1,
+        regime_prob_2
 
     Attributes:
-        config (Dict[str, Any]): Configuration dictionary
-        n_regimes (int): Number of GMM components (default 3)
-        model (GaussianMixture): Fitted GMM model
-        scaler (StandardScaler): Scaler fitted on training regime features
-        regime_order (Dict[int, int]): Mapping from GMM component index to
-            volatility-ordered regime index
-        regime_features (List[str]): Features used for regime detection
+        config (Dict[str, Any]):    Configuration dictionary.
+        n_regimes (int):            Number of GMM components (default 3).
+        model (GaussianMixture):    Fitted GMM; None before fit().
+        scaler (StandardScaler):    Scaler fitted on training data; None before fit().
+        regime_order (Dict[int,int]): GMM component → volatility-ordered index.
+        regime_features (List[str]): ['ret_1d', 'vol_20d', 'vix'].
     """
 
     def __init__(self, config: Dict[str, Any], n_regimes: int = 3):
         """
-        Initialize RegimeDetector.
+        Initialise RegimeDetector.
 
         Args:
-            config: Configuration dictionary
-            n_regimes: Number of regimes (default 3: low, medium, high volatility)
+            config:    Configuration dictionary (not read directly; reserved
+                       for future parameter overrides).
+            n_regimes: Number of GMM components.  Default 3 = Bull / Neutral /
+                       Bear.  See module docstring for rationale.
         """
         self.config = config
         self.n_regimes = n_regimes
 
-        self.model = None
-        self.scaler = None
+        self.model        = None
+        self.scaler       = None
         self.regime_order = None
 
+        # The three market-state features fed to the GMM.
+        # VIX is included here but excluded from the model feature matrix X.
         self.regime_features = ['ret_1d', 'vol_20d', 'vix']
 
-        logger.info(f"RegimeDetector initialized: GMM with {n_regimes} regimes")
+        logger.info(
+            f"RegimeDetector initialised  |  "
+            f"GMM n_components={n_regimes}  |  "
+            f"inputs: {self.regime_features}"
+        )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
     def _extract_regime_features(self, X: pd.DataFrame) -> np.ndarray:
         """
-        Extract and clean the three features used for regime detection.
+        Extract the three GMM input features and handle NaN values.
+
+        NaN handling
+        ~~~~~~~~~~~~
+        Forward fill propagates the last valid value; ``fillna(0)`` handles
+        leading NaNs at the very start of the series (before vol_20d has
+        warmed up, ~1 row).  In the walk-forward setting the training window
+        starts in 2010, well after the warmup period, so leading NaN rows
+        are essentially never present.  The fallback to 0 is a safe default
+        that places any residual edge-case rows in the low-vol region of the
+        scaled feature space.
 
         Args:
-            X: DataFrame with all features
+            X: DataFrame containing 'ret_1d', 'vol_20d', and 'vix' columns.
 
         Returns:
-            Array of shape (n_samples, 3) containing [ret_1d, vol_20d, vix]
+            NumPy array of shape (n_samples, 3).
 
         Raises:
-            ValueError: If any of the required features are missing
+            ValueError: If any of the required features are missing.
         """
         missing = [f for f in self.regime_features if f not in X.columns]
         if missing:
-            raise ValueError(f"Missing regime features: {missing}")
+            raise ValueError(
+                f"Required GMM features missing: {missing}.  "
+                f"Available columns: {X.columns.tolist()}"
+            )
 
         features = X[self.regime_features].values
 
         if np.isnan(features).any():
-            logger.warning("NaN values in regime features — applying forward fill")
+            logger.warning("NaN in GMM features — applying forward fill then fillna(0)")
             features = (
                 pd.DataFrame(features, columns=self.regime_features)
                 .ffill()
@@ -103,81 +192,112 @@ class RegimeDetector:
         labels: np.ndarray
     ) -> Dict[int, int]:
         """
-        Build a mapping from GMM component indices to volatility-ordered regime indices.
+        Map GMM component indices to volatility-ordered regime indices.
 
-        Regimes are ordered by their mean vol_20d value in the scaled feature space,
-        so that regime 0 = lowest volatility and regime 2 = highest volatility.
-        This ensures consistent regime labelling across folds regardless of the
-        arbitrary component ordering produced by the GMM.
+        GMM component indices are arbitrary (depend on random initialization).
+        Sorting by mean vol_20d in the scaled feature space gives a stable,
+        interpretable ordering: 0 = lowest vol, 2 = highest vol, across all
+        folds.
+
+        vol_20d is index 1 in ``features_scaled`` (column order matches
+        ``self.regime_features = ['ret_1d', 'vol_20d', 'vix']``).
 
         Args:
-            features_scaled: Scaled training features, shape (n_samples, 3)
-            labels: Raw GMM component assignments, shape (n_samples,)
+            features_scaled: Scaled training features, shape (n_samples, 3).
+            labels:          Raw GMM component assignments, shape (n_samples,).
 
         Returns:
-            Dictionary mapping original GMM index to ordered regime index
+            Dict mapping original_component_index → ordered_regime_index.
         """
-        # vol_20d is the second feature (index 1) in the scaled array
-        regime_vols = {}
-        for regime in range(self.n_regimes):
-            mask = labels == regime
-            regime_vols[regime] = features_scaled[mask, 1].mean() if mask.sum() > 0 else 0.0
+        regime_vols = {
+            regime: (
+                features_scaled[labels == regime, 1].mean()
+                if (labels == regime).sum() > 0 else 0.0
+            )
+            for regime in range(self.n_regimes)
+        }
 
         sorted_regimes = sorted(regime_vols.items(), key=lambda x: x[1])
-        regime_order = {
+        regime_order   = {
             original: ordered
             for ordered, (original, _) in enumerate(sorted_regimes)
         }
 
-        logger.info(f"Regime ordering by volatility: {regime_order}")
+        logger.info(
+            f"Regime ordering (GMM index → vol-ordered): {regime_order}  |  "
+            f"mean vol_20d (scaled): "
+            + "  ".join(f"r{k}={v:.3f}" for k, v in sorted(regime_vols.items()))
+        )
+
         return regime_order
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def fit(self, X_train: pd.DataFrame) -> 'RegimeDetector':
         """
-        Fit the GMM regime detector on training data.
+        Fit the GMM and StandardScaler on training data.
 
-        The scaler is fitted on the training features and stored so that
-        validation data can be transformed consistently. The regime ordering
-        is also computed here and stored for use in predict().
+        GMM hyperparameters
+        ~~~~~~~~~~~~~~~~~~~
+        - ``covariance_type='full'``: each component has its own full
+          covariance matrix, allowing elliptical clusters.  The three market
+          regimes have very different shapes in feature space.
+        - ``n_init=10``: the GMM is initialized 10 times with different random
+          seeds; the best solution (highest log-likelihood) is kept.  This
+          guards against convergence to a local optimum.
+        - ``max_iter=200``: allows the EM algorithm to converge even in
+          challenging cases (e.g. small training windows in early folds).
+        - ``random_state=42``: reproducibility across runs.
+
+        No-look-ahead guarantee
+        ~~~~~~~~~~~~~~~~~~~~~~~
+        ``scaler.fit_transform`` and ``model.fit`` are called on training data
+        only.  The fitted objects are stored on ``self`` for later use in
+        ``predict()``, which calls ``scaler.transform`` and ``model.predict``
+        on new (validation) data without re-fitting.
+
+        IMPORTANT: ``X_train`` must be the **full** fold DataFrame (including
+        'vix', 'ret_1d'), not the 11-feature classification matrix.
 
         Args:
-            X_train: Training features DataFrame
+            X_train: Full training DataFrame with 'ret_1d', 'vol_20d', 'vix'.
 
         Returns:
-            Self for method chaining
+            Self (for method chaining).
         """
         try:
-            logger.info("Fitting GMM regime detector...")
+            logger.info("Fitting GMM regime detector on training data...")
 
             features = self._extract_regime_features(X_train)
 
-            self.scaler = StandardScaler()
-            features_scaled = self.scaler.fit_transform(features)
+            self.scaler       = StandardScaler()
+            features_scaled   = self.scaler.fit_transform(features)
 
             self.model = GaussianMixture(
                 n_components=self.n_regimes,
                 covariance_type='full',
                 random_state=42,
                 n_init=10,
-                max_iter=200
+                max_iter=200,
             )
             self.model.fit(features_scaled)
             labels = self.model.predict(features_scaled)
 
-            self.regime_order = self._order_regimes_by_volatility(features_scaled, labels)
+            self.regime_order  = self._order_regimes_by_volatility(features_scaled, labels)
+            ordered_labels     = np.array([self.regime_order[l] for l in labels])
 
-            # Compute and log regime statistics using ordered labels
-            ordered_labels = np.array([self.regime_order[l] for l in labels])
             regime_stats = self.get_regime_stats(X_train, ordered_labels)
-            logger.success("GMM regime detector fitted successfully")
-            logger.info(f"\nRegime statistics:\n{regime_stats}")
+            logger.success("GMM fitted successfully")
+            logger.info(f"Regime statistics (training data):\n{regime_stats}")
 
             return self
 
         except Exception as e:
-            logger.error(f"Error fitting regime detector: {str(e)}")
-            self.model = None
-            self.scaler = None
+            logger.error(f"GMM fitting failed: {e}")
+            self.model        = None
+            self.scaler       = None
             self.regime_order = None
             return self
 
@@ -186,32 +306,37 @@ class RegimeDetector:
         X: pd.DataFrame
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Predict regime states and probabilities for new data.
+        Assign regime labels and probabilities to new data.
 
-        Uses the scaler and GMM fitted on training data. Both regime labels
-        and probabilities are reordered to match the volatility-based ordering
-        established during fit().
+        Uses the scaler and GMM stored from ``fit()``.  Both labels and
+        probabilities are reordered to match the volatility-based ordering
+        established during training.
+
+        IMPORTANT: ``X`` must include 'vix', 'ret_1d', 'vol_20d' (full
+        DataFrame, not the 11-feature classification matrix).
 
         Args:
-            X: Features DataFrame
+            X: Full DataFrame with 'ret_1d', 'vol_20d', 'vix'.
 
         Returns:
-            Tuple of (regime_state, regime_proba):
-            - regime_state: array of integers in {0, 1, 2} ordered by volatility
-            - regime_proba: array of shape (n_samples, n_regimes)
-            Returns (None, None) if model is not fitted or prediction fails
+            Tuple (regime_state, regime_proba):
+            - regime_state: int array ∈ {0,1,2}, volatility-ordered.
+            - regime_proba: float array, shape (n_samples, n_regimes),
+              columns ordered by volatility (col 0 = low-vol probability).
+            Returns (None, None) if the model is not fitted or prediction fails.
         """
         if self.model is None or self.scaler is None:
-            logger.warning("Regime detector not fitted, cannot predict")
+            logger.warning("RegimeDetector not fitted — cannot predict")
             return None, None
 
         try:
-            features = self._extract_regime_features(X)
-            features_scaled = self.scaler.transform(features)
+            features        = self._extract_regime_features(X)
+            features_scaled = self.scaler.transform(features)   # transform, not fit_transform
 
             labels = self.model.predict(features_scaled)
-            proba = self.model.predict_proba(features_scaled)
+            proba  = self.model.predict_proba(features_scaled)
 
+            # Remap component indices to volatility-ordered regime indices
             ordered_labels = np.array([self.regime_order[l] for l in labels])
 
             ordered_proba = np.zeros_like(proba)
@@ -221,7 +346,7 @@ class RegimeDetector:
             return ordered_labels, ordered_proba
 
         except Exception as e:
-            logger.error(f"Error predicting regimes: {str(e)}")
+            logger.error(f"GMM prediction failed: {e}")
             return None, None
 
     def add_regime_features(
@@ -231,79 +356,32 @@ class RegimeDetector:
         regime_proba: np.ndarray
     ) -> pd.DataFrame:
         """
-        Append regime state and per-regime probabilities to the feature DataFrame.
+        Append regime columns to the feature DataFrame.
 
-        Adds four columns:
-        - regime_state: integer in {0, 1, 2} (0 = low vol, 2 = high vol)
-        - regime_prob_0: probability of low-volatility regime
-        - regime_prob_1: probability of medium-volatility regime
-        - regime_prob_2: probability of high-volatility regime
+        Adds four columns (the 4 regime features used by regime-aware models):
+            regime_state   — int ∈ {0=Bull, 1=Neutral, 2=Bear/Crisis}
+            regime_prob_0  — posterior P(low-vol regime)
+            regime_prob_1  — posterior P(medium-vol regime)
+            regime_prob_2  — posterior P(high-vol/crisis regime)
 
         Args:
-            X: Original features DataFrame
-            regime_state: Array of ordered regime states
-            regime_proba: Array of shape (n_samples, n_regimes)
+            X:             Feature DataFrame to augment.
+            regime_state:  Volatility-ordered regime labels, shape (n_samples,).
+            regime_proba:  Ordered probabilities, shape (n_samples, n_regimes).
 
         Returns:
-            DataFrame with regime columns appended
+            Copy of X with four additional columns.
         """
-        X_with_regime = X.copy()
-        X_with_regime['regime_state'] = regime_state
-
+        result = X.copy()
+        result['regime_state'] = regime_state
         for i in range(self.n_regimes):
-            X_with_regime[f'regime_prob_{i}'] = regime_proba[:, i]
+            result[f'regime_prob_{i}'] = regime_proba[:, i]
 
-        logger.info(f"Added {1 + self.n_regimes} regime features to DataFrame")
-        return X_with_regime
-
-    def get_regime_stats(
-        self,
-        X_train: pd.DataFrame,
-        regime_state: np.ndarray
-    ) -> pd.DataFrame:
-        """
-        Compute descriptive statistics for each regime.
-
-        Expects regime_state to use the volatility-ordered labels (0, 1, 2)
-        so that the statistics are interpretable and consistent across folds.
-
-        Args:
-            X_train: Training features DataFrame
-            regime_state: Array of ordered regime states {0, 1, 2}
-
-        Returns:
-            DataFrame indexed by regime with columns:
-            mean_return, std_return, mean_vix, count, pct
-        """
-        stats = []
-
-        for regime in range(self.n_regimes):
-            mask = regime_state == regime
-            n_obs = mask.sum()
-
-            if n_obs > 0:
-                regime_data = X_train[mask]
-                stat = {
-                    'regime': regime,
-                    'mean_return': regime_data['ret_1d'].mean(),
-                    'std_return': regime_data['ret_1d'].std(),
-                    'mean_vix': regime_data['vix'].mean(),
-                    'count': int(n_obs),
-                    'pct': n_obs / len(X_train) * 100
-                }
-            else:
-                stat = {
-                    'regime': regime,
-                    'mean_return': 0.0,
-                    'std_return': 0.0,
-                    'mean_vix': 0.0,
-                    'count': 0,
-                    'pct': 0.0
-                }
-
-            stats.append(stat)
-
-        return pd.DataFrame(stats).set_index('regime')
+        logger.debug(
+            f"Regime features appended: regime_state + "
+            f"{[f'regime_prob_{i}' for i in range(self.n_regimes)]}"
+        )
+        return result
 
     def fit_predict(
         self,
@@ -311,44 +389,99 @@ class RegimeDetector:
         X_val: pd.DataFrame
     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Fit on training data and add regime features to both train and validation sets.
+        Fit on training data and augment both train and validation sets.
 
-        This is the main method used in the walk-forward loop. The GMM is fitted
-        exclusively on training data, then applied to both sets. This guarantees
-        no look-ahead bias — the regime model has no access to validation data
-        during fitting.
+        This is the primary method called inside the walk-forward loop.
+        The GMM is fitted on ``X_train`` only, then applied to both sets —
+        guaranteeing no validation data is seen during fitting.
+
+        Fallback behaviour: if fitting or prediction fails for any reason,
+        the original unmodified DataFrames are returned so that the
+        walk-forward loop can continue without the regime features.
 
         Args:
-            X_train: Training features DataFrame
-            X_val: Validation features DataFrame
+            X_train: Full training DataFrame (with 'vix', 'ret_1d', 'vol_20d').
+            X_val:   Full validation DataFrame (same columns required).
 
         Returns:
-            Tuple of (X_train_with_regime, X_val_with_regime).
-            Returns (X_train, X_val) unchanged if fitting or prediction fails.
+            Tuple (X_train_with_regime, X_val_with_regime), each augmented
+            with regime_state and regime_prob_0/1/2.  Returns the originals
+            unchanged if regime detection fails.
         """
         self.fit(X_train)
 
         if self.model is None:
-            logger.warning("Regime detection failed, returning original DataFrames")
+            logger.warning("Regime fitting failed — returning original DataFrames")
             return X_train, X_val
 
         train_state, train_proba = self.predict(X_train)
         if train_state is None:
-            logger.warning("Regime prediction failed on train, returning original DataFrames")
+            logger.warning("Regime prediction failed on train — returning original DataFrames")
             return X_train, X_val
 
-        X_train_with_regime = self.add_regime_features(X_train, train_state, train_proba)
+        X_train_regime = self.add_regime_features(X_train, train_state, train_proba)
 
         val_state, val_proba = self.predict(X_val)
         if val_state is None:
-            logger.warning("Regime prediction failed on val, returning original DataFrames")
+            logger.warning("Regime prediction failed on val — returning original DataFrames")
             return X_train, X_val
 
-        X_val_with_regime = self.add_regime_features(X_val, val_state, val_proba)
+        X_val_regime = self.add_regime_features(X_val, val_state, val_proba)
 
         logger.success(
-            f"Regime features added — train: {X_train_with_regime.shape}, "
-            f"val: {X_val_with_regime.shape}"
+            f"Regime features added  |  "
+            f"train: {X_train_regime.shape}  |  val: {X_val_regime.shape}"
         )
 
-        return X_train_with_regime, X_val_with_regime
+        return X_train_regime, X_val_regime
+
+    # ------------------------------------------------------------------
+    # Inspection utility
+    # ------------------------------------------------------------------
+
+    def get_regime_stats(
+        self,
+        X_train: pd.DataFrame,
+        regime_state: np.ndarray
+    ) -> pd.DataFrame:
+        """
+        Compute per-regime descriptive statistics on training data.
+
+        Useful for verifying that the volatility ordering is correct and
+        that each regime has a meaningful interpretation:
+            regime 0 → low mean_vix, positive mean_return  (Bull)
+            regime 1 → intermediate                         (Neutral)
+            regime 2 → high mean_vix, negative mean_return  (Bear/Crisis)
+
+        Args:
+            X_train:      Training DataFrame with 'ret_1d' and 'vix'.
+            regime_state: Volatility-ordered regime labels, shape (n_samples,).
+
+        Returns:
+            DataFrame indexed by regime (0, 1, 2) with columns:
+            mean_return, std_return, mean_vix, count, pct.
+        """
+        stats = []
+
+        for regime in range(self.n_regimes):
+            mask  = regime_state == regime
+            n_obs = int(mask.sum())
+
+            if n_obs > 0:
+                rd = X_train[mask]
+                stats.append({
+                    'regime':      regime,
+                    'mean_return': round(float(rd['ret_1d'].mean()), 5),
+                    'std_return':  round(float(rd['ret_1d'].std()), 5),
+                    'mean_vix':    round(float(rd['vix'].mean()), 2),
+                    'count':       n_obs,
+                    'pct':         round(n_obs / len(X_train) * 100, 1),
+                })
+            else:
+                stats.append({
+                    'regime': regime, 'mean_return': 0.0,
+                    'std_return': 0.0, 'mean_vix': 0.0,
+                    'count': 0, 'pct': 0.0,
+                })
+
+        return pd.DataFrame(stats).set_index('regime')

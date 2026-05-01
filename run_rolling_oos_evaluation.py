@@ -12,9 +12,14 @@ This provides realistic evaluation by retraining quarterly on a rolling 3-year
 window, allowing the model to adapt to recent market conditions while maintaining
 consistent training data size.
 
-Trains exclusively on SPY (S&P 500 ETF) using 16 pure technical features.
+Trains exclusively on SPY (S&P 500 ETF) using 11 stationary technical features.
+Both long-short (primary) and long-only (secondary) strategies are evaluated.
+
+Iteration 1: 11 pure technical features (baseline)
+Iteration 2: 11 technical + 4 regime features (GMM regime detection)
 """
 
+import argparse
 import warnings
 import yaml
 import pickle
@@ -24,30 +29,23 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, brier_score_loss
+
+from interpret.glassbox import ExplainableBoostingClassifier
+
 from src.ingestion.loader import DataLoader
 from src.models.train import ModelTrainer
 from src.models.regime_detection import RegimeDetector
+from src.models.walk_forward import TECHNICAL_FEATURES
 
 warnings.filterwarnings('ignore', category=FutureWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
 
 
-# Define the 16 pure technical features (baseline iteration 1)
-TECHNICAL_FEATURES = [
-    # Returns (3)
-    'ret_1d', 'ret_5d', 'ret_21d',
-    # Volatility (2)
-    'vol_20d', 'atr_14',
-    # Technical indicators (10)
-    'rsi_14', 'macd_line', 'macd_signal', 'macd_hist',
-    'bb_mid', 'bb_upper', 'bb_lower', 'bb_pct', 'bb_width',
-    'volume_ratio',
-    # Trend context (1)
-    'sma_200_dist'
-]
+# TECHNICAL_FEATURES imported from src.models.walk_forward — single source of truth.
 
 
-def create_rolling_oos_folds(data, config):
+def create_rolling_oos_folds():
     """
     Create quarterly rolling OOS folds for 2020-2024.
     
@@ -99,7 +97,7 @@ def get_feature_columns(data_df, iteration):
     """
     Get feature columns for the given iteration.
     
-    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 16 features
+    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 11 features
     as in walk_forward.py.
     
     Args:
@@ -123,7 +121,82 @@ def get_feature_columns(data_df, iteration):
     return feature_cols
 
 
-def train_fold(data, fold_info, config, iteration):
+def load_is_last_fold_models(iteration, best_T, suffix=''):
+    """
+    Load last-fold models from IS walk-forward results.
+
+    The IS walk-forward (2008-2020) produces the initial models. These are
+    applied directly to the first OOS quarter (Q1 2020) without retraining,
+    following the tutor's pipeline design: "se llega al backtest con los
+    modelos entrenados, no se empieza de cero".
+
+    Args:
+        iteration: 1 for baseline, 2 for regime features
+        best_T: distillation temperature (used to select EBM distilled)
+
+    Returns:
+        Dict with IS models, or None if PKL not found
+    """
+    if iteration == 1:
+        path = Path(f'data/processed/walk_forward_results{suffix}.pkl')
+        distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
+
+        if not path.exists():
+            logger.warning(f"IS results not found: {path} — first OOS fold will retrain from scratch")
+            return None
+
+        with open(path, 'rb') as f:
+            wf = pickle.load(f)
+
+        last = wf['all_fold_results'][-1]
+        is_models = {
+            'lightgbm': last['models']['lightgbm'],
+            'ebm_distilled': None,
+            'feature_names': last['feature_names'],
+            'fold_number': last['fold_number'],
+        }
+
+        if distill_path.exists():
+            with open(distill_path, 'rb') as f:
+                distill = pickle.load(f)
+            last_d = distill['all_fold_results'][-1]
+            is_models['ebm_distilled'] = last_d['ebm_distilled_models'].get(best_T)
+            if is_models['ebm_distilled'] is not None:
+                logger.info(f"IS EBM distilled (T={best_T}) loaded from distillation fold {last_d['fold_number']}")
+        else:
+            logger.warning("Distillation PKL not found — EBM distilled will be retrained for first OOS fold")
+
+        logger.info(f"IS Iter 1 models loaded from fold {last['fold_number']} "
+                    f"(features: {is_models['feature_names']})")
+        return is_models
+
+    elif iteration == 2:
+        path = Path(f'data/processed/walk_forward_results_regime{suffix}.pkl')
+
+        if not path.exists():
+            logger.warning(f"IS regime results not found: {path} — first OOS fold will retrain from scratch")
+            return None
+
+        with open(path, 'rb') as f:
+            wf = pickle.load(f)
+
+        last = wf['all_fold_results'][-1]
+        is_models = {
+            'lightgbm': last['models']['lightgbm'],
+            'ebm_distilled': None,  # trained using IS LightGBM soft labels in first fold
+            'regime_detector': last.get('regime_detector'),
+            'feature_names': last['feature_names'],
+            'fold_number': last['fold_number'],
+        }
+
+        logger.info(f"IS Iter 2 models loaded from fold {last['fold_number']} "
+                    f"(features: {is_models['feature_names']})")
+        return is_models
+
+    return None
+
+
+def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
     """Train models for a single fold."""
     logger.info(f"\n{'=' * 80}")
     logger.info(f"FOLD {fold_info['fold_id']}: {fold_info['quarter_label']}")
@@ -147,11 +220,15 @@ def train_fold(data, fold_info, config, iteration):
     
     # Handle regime features for iteration 2
     if iteration == 2:
-        logger.info("Detecting regimes on training data...")
-        regime_detector = RegimeDetector(config)
-        
-        # Fit GMM on training data
-        regime_detector.fit(train_data)
+        if is_models is not None and is_models.get('regime_detector') is not None:
+            # First OOS fold: use IS regime detector — no refitting
+            logger.info("First OOS fold: using IS GMM regime detector (no refitting)...")
+            regime_detector = is_models['regime_detector']
+        else:
+            logger.info("Detecting regimes on training data...")
+            regime_detector = RegimeDetector(config)
+            # Fit GMM on training data
+            regime_detector.fit(train_data)
         
         # Get regime labels and probabilities for training data
         train_regime_labels, train_regime_probs = regime_detector.predict(train_data)
@@ -171,142 +248,147 @@ def train_fold(data, fold_info, config, iteration):
         test_data['regime_prob_2'] = test_regime_probs[:, 2]
     
     # Get feature columns
-    feature_cols = get_feature_columns(train_data, iteration)
-    
+    # For first OOS fold using IS models: use the exact feature set the IS model was trained on.
+    # This handles IC-selected subsets: IS model may have been trained on fewer than 13 features.
+    if is_models is not None:
+        feature_cols = is_models['feature_names']
+        logger.info(f"First OOS fold: using IS feature set ({len(feature_cols)} features)")
+    else:
+        feature_cols = get_feature_columns(train_data, iteration)
+
     logger.info(f"Features selected: {len(feature_cols)}")
     logger.info(f"Feature list: {feature_cols}")
-    
-    # ASSERTION: Verify feature count
-    expected_count = 16 if iteration == 1 else 20  # 16 technical, or 16 + 4 regime
-    if len(feature_cols) != expected_count:
+
+    # ASSERTION: Verify feature count (skip for IS models — may use IC-selected subset)
+    expected_count = 11 if iteration == 1 else 15  # 11 technical, or 11 + 4 regime
+    if is_models is None and len(feature_cols) != expected_count:
         error_msg = f"Feature count mismatch! Expected {expected_count}, got {len(feature_cols)}"
         logger.error(error_msg)
         logger.error(f"Features: {feature_cols}")
-        
+
         # Check which columns are extra or missing
         if iteration == 1:
             expected_features = TECHNICAL_FEATURES
         else:
             expected_features = TECHNICAL_FEATURES + ['regime_state', 'regime_prob_0', 'regime_prob_1', 'regime_prob_2']
-        
+
         extra = set(feature_cols) - set(expected_features)
         missing = set(expected_features) - set(feature_cols)
-        
+
         if extra:
             logger.error(f"Extra columns: {extra}")
         if missing:
             logger.error(f"Missing columns: {missing}")
-        
+
         raise ValueError(error_msg)
     
     logger.success(f"✓ Feature count verified: {len(feature_cols)} features")
     
-    # Prepare data for training
-    X_train = train_data[feature_cols].values
-    y_train = train_data['label'].values
-    X_test = test_data[feature_cols].values
-    y_test = test_data['label'].values
-    
-    # Convert labels from {-1, 0, 1} to {0, 1}
-    # label == 1 (take profit) -> 1
-    # label == -1 or 0 (stop loss or time barrier) -> 0
-    y_train_binary = (y_train == 1).astype(int)
-    y_test_binary = (y_test == 1).astype(int)
-    
+    # Drop rows with NaN labels or NaN features before training.
+    # NaN labels appear during the warm-up period (vol_20d needs ~20 rows)
+    # and at the end of the series (last 8 rows have NaN label_binary, max_holding_period).
+    # label_binary: triple barrier — +1 = take profit, -1 = stop loss or time barrier.
+    valid_train = train_data['label_binary'].notna() & train_data[feature_cols].notna().all(axis=1)
+    train_clean = train_data[valid_train]
+
+    valid_test = test_data['label_binary'].notna() & test_data[feature_cols].notna().all(axis=1)
+    test_clean = test_data[valid_test]
+
+    logger.info(f"Train samples after NaN drop: {len(train_clean)} (dropped {len(train_data) - len(train_clean)})")
+    logger.info(f"Test samples after NaN drop:  {len(test_clean)} (dropped {len(test_data) - len(test_clean)})")
+
+    # Prepare arrays for training
+    X_train = train_clean[feature_cols].values
+    y_train_binary = (train_clean['label_binary'] == 1).astype(int).values
+
+    X_test = test_clean[feature_cols].values
+    y_test_binary = (test_clean['label_binary'] == 1).astype(int).values
+
     logger.info(f"Train label distribution: {np.bincount(y_train_binary)}")
     logger.info(f"Test label distribution: {np.bincount(y_test_binary)}")
     
-    # Train models
     trainer = ModelTrainer(config)
-    
-    # Train LightGBM
-    logger.info("Training LightGBM...")
-    lgbm_model = trainer._train_lightgbm(X_train, y_train_binary, fold_info['fold_id'])
-    
-    # Train EBM
-    logger.info("Training EBM...")
-    ebm_model = trainer._train_ebm(X_train, y_train_binary, fold_info['fold_id'])
-    
-    # Train EBM distilled (knowledge distillation from LightGBM with T=4)
-    logger.info("Training EBM distilled (T=4)...")
-    from interpret.glassbox import ExplainableBoostingClassifier
-    
-    # Generate soft labels from LightGBM teacher
-    teacher_proba = lgbm_model.predict_proba(X_train)[:, 1]
-    
-    # Apply temperature scaling with T=4
-    # T=4 was selected as optimal temperature during walk-forward 
-    # validation in run_walk_forward_distillation.py (mean val 
-    # accuracy 0.503, lowest variance across folds). Fixed here 
-    # to avoid data leakage from OOS period.
-    p = np.clip(teacher_proba, 1e-8, 1 - 1e-8)
-    logits = np.log(p / (1 - p))
-    soft_pos = 1 / (1 + np.exp(-logits / 4))
-    
-    # Binarize and compute sample weights
-    y_hard = (soft_pos >= 0.5).astype(int)
-    sample_weight = np.abs(soft_pos - 0.5) * 2
-    
-    # Train EBM distilled with same hyperparameters as EBM
-    ebm_config = config.get('models', {}).get('ebm', {})
-    ebm_dist_model = ExplainableBoostingClassifier(
-        max_bins=ebm_config.get('max_bins', 256),
-        max_interaction_bins=ebm_config.get('max_interaction_bins', 32),
-        interactions=ebm_config.get('interactions', 10),
-        learning_rate=ebm_config.get('learning_rate', 0.01),
-        max_rounds=ebm_config.get('max_rounds', 5000),
-        min_samples_leaf=ebm_config.get('min_samples_leaf', 2),
-        random_state=ebm_config.get('random_state', 42)
-    )
-    ebm_dist_model.fit(X_train, y_hard, sample_weight=sample_weight)
-    logger.success("EBM distilled trained")
+
+    if is_models is not None:
+        # First OOS fold: carry IS walk-forward models forward — no retraining.
+        logger.info(f"First OOS fold: using IS models from fold {is_models['fold_number']} "
+                    f"(LightGBM) — no retraining")
+        lgbm_model = is_models['lightgbm']
+    else:
+        # Subsequent OOS folds: retrain on the 3-year rolling window
+        logger.info("Training LightGBM...")
+        lgbm_model = trainer._train_lightgbm(X_train, y_train_binary, fold_info['fold_id'])
+
+    # EBM distilled (knowledge distillation from LightGBM)
+    if is_models is not None and is_models.get('ebm_distilled') is not None:
+        # First OOS fold Iter 1: IS distilled EBM available
+        logger.info(f"First OOS fold: using IS distilled EBM (T={best_T})")
+        ebm_dist_model = is_models['ebm_distilled']
+    else:
+        # All other cases: train EBM distilled using lgbm_model soft labels.
+        # For first OOS fold Iter 2 (no IS distilled): lgbm_model is the IS LightGBM,
+        # so distillation still uses IS knowledge — consistent with tutor's design.
+        logger.info(f"Training EBM distilled (T={best_T})...")
+        teacher_proba = lgbm_model.predict_proba(X_train)[:, 1]
+
+        # Temperature scaling — best_T selected on IS period, no look-ahead
+        p = np.clip(teacher_proba, 1e-8, 1 - 1e-8)
+        logits = np.log(p / (1 - p))
+        soft_pos = 1 / (1 + np.exp(-logits / best_T))
+
+        y_hard = (soft_pos >= 0.5).astype(int)
+        sample_weight = np.abs(soft_pos - 0.5) * 2
+
+        ebm_config = config.get('models', {}).get('ebm', {})
+        ebm_dist_model = ExplainableBoostingClassifier(
+            max_bins=ebm_config.get('max_bins', 128),
+            max_interaction_bins=ebm_config.get('max_interaction_bins', 32),
+            interactions=ebm_config.get('interactions', 10),
+            learning_rate=ebm_config.get('learning_rate', 0.01),
+            max_rounds=ebm_config.get('max_rounds', 5000),
+            min_samples_leaf=ebm_config.get('min_samples_leaf', 10),
+            random_state=ebm_config.get('random_state', 42)
+        )
+        ebm_dist_model.fit(X_train, y_hard, sample_weight=sample_weight)
+        logger.success("EBM distilled trained")
     
     # Evaluate on test set (SPY only)
     results = {}
-    
+
     ticker = 'SPY'
-    ticker_mask = test_data.index.get_level_values('ticker') == ticker
+    ticker_mask = test_clean.index.get_level_values('ticker') == ticker
     X_test_ticker = X_test[ticker_mask]
     y_test_ticker = y_test_binary[ticker_mask]
     
     # Get predictions
     lgbm_pred_proba = lgbm_model.predict_proba(X_test_ticker)[:, 1]
     lgbm_pred = (lgbm_pred_proba >= 0.5).astype(int)
-    
-    ebm_pred_proba = ebm_model.predict_proba(X_test_ticker)[:, 1]
-    ebm_pred = (ebm_pred_proba >= 0.5).astype(int)
-    
+
     ebm_dist_pred_proba = ebm_dist_model.predict_proba(X_test_ticker)[:, 1]
     ebm_dist_pred = (ebm_dist_pred_proba >= 0.5).astype(int)
-    
-    # Calculate metrics
-    from sklearn.metrics import accuracy_score, roc_auc_score
     
     results[ticker] = {
         'lightgbm': {
             'accuracy': accuracy_score(y_test_ticker, lgbm_pred),
             'roc_auc': roc_auc_score(y_test_ticker, lgbm_pred_proba),
+            'f1': f1_score(y_test_ticker, lgbm_pred, zero_division=0),
+            'brier_score': brier_score_loss(y_test_ticker, lgbm_pred_proba),
             'predictions': lgbm_pred,
             'pred_proba': lgbm_pred_proba
-        },
-        'ebm': {
-            'accuracy': accuracy_score(y_test_ticker, ebm_pred),
-            'roc_auc': roc_auc_score(y_test_ticker, ebm_pred_proba),
-            'predictions': ebm_pred,
-            'pred_proba': ebm_pred_proba
         },
         'ebm_distilled': {
             'accuracy': accuracy_score(y_test_ticker, ebm_dist_pred),
             'roc_auc': roc_auc_score(y_test_ticker, ebm_dist_pred_proba),
+            'f1': f1_score(y_test_ticker, ebm_dist_pred, zero_division=0),
+            'brier_score': brier_score_loss(y_test_ticker, ebm_dist_pred_proba),
             'predictions': ebm_dist_pred,
             'pred_proba': ebm_dist_pred_proba
         },
         'y_true': y_test_ticker,
-        'test_data': test_data[ticker_mask]
+        'test_data': test_clean[ticker_mask]
     }
     
     logger.info(f"{ticker} - LightGBM: Acc={results[ticker]['lightgbm']['accuracy']:.3f}, AUC={results[ticker]['lightgbm']['roc_auc']:.3f}")
-    logger.info(f"{ticker} - EBM: Acc={results[ticker]['ebm']['accuracy']:.3f}, AUC={results[ticker]['ebm']['roc_auc']:.3f}")
     logger.info(f"{ticker} - EBM Distilled: Acc={results[ticker]['ebm_distilled']['accuracy']:.3f}, AUC={results[ticker]['ebm_distilled']['roc_auc']:.3f}")
     
     return results
@@ -355,27 +437,48 @@ def calculate_trading_metrics(predictions, test_data, strategy='long_only'):
 
 def main():
     """Run quarterly rolling OOS evaluation."""
+    parser = argparse.ArgumentParser(description='Quarterly rolling OOS evaluation')
+    parser.add_argument('--config', default='config/config.yaml',
+                        help='Path to config YAML (default: config/config.yaml)')
+    args = parser.parse_args()
+
+    config_stem = Path(args.config).stem
+    suffix = config_stem[len('config'):]
+
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = f"logs/rolling_oos_quarterly_{timestamp}.log"
-    
+
     logger.add(
         log_file,
         rotation="1 day",
         retention="7 days",
         level="DEBUG"
     )
-    
+
     logger.info("=" * 80)
     logger.info("QUARTERLY ROLLING WALK-FORWARD EVALUATION: OOS PERIOD 2020-2024")
     logger.info("=" * 80)
-    logger.info("Retraining models quarterly with 3-year rolling window")
-    logger.info("Training exclusively on SPY with 16 pure technical features")
+    logger.info("Q1 2020: IS walk-forward models carried forward (no retraining)")
+    logger.info("Q2 2020 onwards: quarterly retraining with 3-year rolling window")
+    logger.info("Training exclusively on SPY with 11 stationary technical features")
+    logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
     logger.info("=" * 80)
-    
+
     # Load config
-    with open('config/config.yaml', 'r') as f:
+    with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
-    
+
+    # Load best temperature from distillation results (selected on IS period)
+    distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
+    if distill_path.exists():
+        with open(distill_path, 'rb') as f:
+            distill_results = pickle.load(f)
+        best_T = distill_results['best_T']
+        logger.info(f"Best temperature loaded from distillation results: T={best_T}")
+    else:
+        best_T = 4
+        logger.warning(f"Distillation results not found — using default T={best_T}")
+
     # Load data
     logger.info("\nLoading data...")
     loader = DataLoader(config)
@@ -385,7 +488,7 @@ def main():
     logger.info(f"Date range: {data.index.get_level_values('date').min()} to {data.index.get_level_values('date').max()}")
     
     # Create folds
-    folds = create_rolling_oos_folds(data, config)
+    folds = create_rolling_oos_folds()
     logger.info(f"\nGenerated {len(folds)} quarterly folds")
     
     # Run both iterations
@@ -394,25 +497,38 @@ def main():
         'iteration_2': {}   # With regime features
     }
     
+    # Load IS walk-forward models for the first OOS fold.
+    # The IS walk-forward (2008-2020) produces the initial models; Q1 2020 uses
+    # them directly. From Q2 2020 onwards, models are retrained quarterly.
+    logger.info("\nLoading IS walk-forward models for first OOS fold (Q1 2020)...")
+    is_models_per_iter = {
+        1: load_is_last_fold_models(1, best_T, suffix),
+        2: load_is_last_fold_models(2, best_T, suffix),
+    }
+
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
-        logger.info(f"ITERATION {iteration}: {'BASELINE (16 pure technical features)' if iteration == 1 else 'WITH REGIME FEATURES (16 technical + 4 regime)'}")
+        logger.info(f"ITERATION {iteration}: {'BASELINE (11 stationary technical features)' if iteration == 1 else 'WITH REGIME FEATURES (11 technical + 4 regime)'}")
         logger.info(f"{'=' * 80}")
-        
+
+        is_models_iter = is_models_per_iter[iteration]
         iteration_results = []
-        
-        for fold_info in folds:
-            fold_results = train_fold(data, fold_info, config, iteration)
+
+        for fold_idx, fold_info in enumerate(folds):
+            # Pass IS models only for the first fold (Q1 2020)
+            is_models = is_models_iter if fold_idx == 0 else None
+            fold_results = train_fold(data, fold_info, config, iteration, best_T=best_T,
+                                      is_models=is_models)
             fold_results['fold_info'] = fold_info
             iteration_results.append(fold_results)
         
         # Aggregate results across all folds (SPY only)
         aggregated = {
-            'SPY': {'lightgbm': {}, 'ebm': {}, 'ebm_distilled': {}}
+            'SPY': {'lightgbm': {}, 'ebm_distilled': {}}
         }
         
         ticker = 'SPY'
-        for model in ['lightgbm', 'ebm', 'ebm_distilled']:
+        for model in ['lightgbm', 'ebm_distilled']:
             # Collect all predictions and true labels
             all_preds = []
             all_proba = []
@@ -432,14 +548,20 @@ def main():
             all_test_data = pd.concat(all_test_data)
             
             # Calculate overall metrics
-            from sklearn.metrics import accuracy_score, roc_auc_score
-            
             aggregated[ticker][model]['accuracy'] = accuracy_score(all_true, all_preds)
             aggregated[ticker][model]['roc_auc'] = roc_auc_score(all_true, all_proba)
-            
-            # Calculate trading metrics
-            trading_metrics = calculate_trading_metrics(all_preds, all_test_data, strategy='long_only')
-            aggregated[ticker][model]['trading'] = trading_metrics
+            aggregated[ticker][model]['f1'] = f1_score(all_true, all_preds, zero_division=0)
+            aggregated[ticker][model]['brier_score'] = brier_score_loss(all_true, all_proba)
+
+            # Calculate trading metrics for both strategies
+            # Long-short is the primary strategy (acts on both signals)
+            # Long-only is shown as a robustness check (cash when signal=-1)
+            aggregated[ticker][model]['trading_longshort'] = calculate_trading_metrics(
+                all_preds, all_test_data, strategy='long_short'
+            )
+            aggregated[ticker][model]['trading_longonly'] = calculate_trading_metrics(
+                all_preds, all_test_data, strategy='long_only'
+            )
         
         all_results[f'iteration_{iteration}'] = {
             'fold_results': iteration_results,
@@ -450,7 +572,7 @@ def main():
     output_dir = Path('data/processed/rolling_oos')
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_path = output_dir / 'rolling_oos_quarterly_results.pkl'
+    output_path = output_dir / f'rolling_oos_quarterly_results{suffix}.pkl'
     with open(output_path, 'wb') as f:
         pickle.dump(all_results, f)
     
@@ -466,22 +588,25 @@ def main():
     print("=" * 80)
     
     for iteration in [1, 2]:
-        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE' if iteration == 1 else 'WITH REGIME FEATURES'}")
+        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE (11 features)' if iteration == 1 else 'WITH REGIME (11 + 4 features)'}")
         print("-" * 80)
-        
+
         agg = all_results[f'iteration_{iteration}']['aggregated']
-        
+
         ticker = 'SPY'
         print(f"\n{ticker}:")
-        for model in ['lightgbm', 'ebm', 'ebm_distilled']:
+        for model in ['lightgbm', 'ebm_distilled']:
             metrics = agg[ticker][model]
-            model_name = 'EBM DISTILLED' if model == 'ebm_distilled' else model.upper()
+            model_name = 'EBM DISTILLED' if model == 'ebm_distilled' else 'LIGHTGBM'
+            ls = metrics['trading_longshort']
+            lo = metrics['trading_longonly']
             print(f"  {model_name}:")
-            print(f"    Accuracy: {metrics['accuracy']:.3f}")
-            print(f"    ROC-AUC:  {metrics['roc_auc']:.3f}")
-            print(f"    Return:   {metrics['trading']['total_return']:>8.2%}")
-            print(f"    Sharpe:   {metrics['trading']['sharpe']:>6.2f}")
-            print(f"    MaxDD:    {metrics['trading']['max_drawdown']:>8.2%}")
+            print(f"    Accuracy:           {metrics['accuracy']:.3f}")
+            print(f"    ROC-AUC:            {metrics['roc_auc']:.3f}")
+            print(f"    F1 Score:           {metrics['f1']:.3f}")
+            print(f"    Brier Score:        {metrics['brier_score']:.4f}")
+            print(f"    [Long-Short] Return:{ls['total_return']:>8.2%}  Sharpe:{ls['sharpe']:>5.2f}  MaxDD:{ls['max_drawdown']:>7.2%}")
+            print(f"    [Long-Only]  Return:{lo['total_return']:>8.2%}  Sharpe:{lo['sharpe']:>5.2f}  MaxDD:{lo['max_drawdown']:>7.2%}")
     
     logger.info(f"\n{'=' * 80}")
     logger.info("QUARTERLY ROLLING OOS EVALUATION COMPLETE")

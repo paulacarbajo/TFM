@@ -1,6 +1,6 @@
 # Market Regime Detection and Knowledge Distillation for Financial Time Series
 
-This repository contains the implementation of a Master's thesis on supervised machine learning for binary classification of financial time series (SPY and USO ETFs) using the Triple Barrier Method for labeling, with two iterations: a baseline model and an enhanced version incorporating GMM-based market regime detection features.
+This repository contains the implementation of a Master's thesis on supervised machine learning for binary classification of financial time series (SPY ETF) using the Triple Barrier Method for labeling, with two iterations: a baseline model and an enhanced version incorporating GMM-based market regime detection features.
 
 ## Repository Structure
 
@@ -157,13 +157,9 @@ python run_shap_analysis.py
 
 - **Price Data:** Yahoo Finance via `yfinance` library
   - SPY (S&P 500 ETF)
-  - USO (United States Oil Fund ETF)
-  - ^VIX (CBOE Volatility Index)
-  - CL=F (Crude Oil Futures)
-  - DX-Y.NYB (US Dollar Index)
 
 - **Macroeconomic Data:** Federal Reserve Economic Data (FRED) via `pandas-datareader`
-  - Interest rates, inflation, unemployment, GDP, etc.
+  - VIX (CBOE Volatility Index / VIXCLS)
 
 ## Key Design Decisions
 

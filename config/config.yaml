@@ -11,6 +11,7 @@ fred_series:
   vix:
     series_id: "VIXCLS"
     name: "VIX Volatility Index"
+    release_lag_days: 0  # Daily series, published same day — no shift needed
 
 # Ingestion parameters
 ingestion:
@@ -81,6 +82,9 @@ models:
     window_type: "rolling"  # "rolling" or "expanding"
     train_window_years: 3   # Fixed training window size (rolling only)
     val_window_years: 1     # Validation window size
+    label_column: "label_binary" # Training target (triple barrier: 1=take profit, -1=stop loss or time barrier)
+    ic_threshold: 0.02               # Min |Spearman IC| vs ret_10d_forward to keep a feature
+    ic_min_features: 6               # Always keep at least this many features
 
   # Columns excluded from the feature matrix X.
   # OHLCV columns are raw price data and must not be used as features.
@@ -88,14 +92,19 @@ models:
   # days_to_barrier is a labeling artefact, not a predictive feature.
   # 
   # BASELINE FEATURE SET (Iteration 1):
-  # Per supervisor guidance, Iteration 1 uses ONLY the 17 pure technical indicators
-  # derived from price and volume. All external market variables (VIX, oil) and
-  # monthly FRED macroeconomic series are excluded from the baseline.
-  # 
-  # These external variables are used as GMM inputs for regime detection in Iteration 2
-  # via train_data_full/val_data_full (passed directly from the full DataFrame),
-  # but they remain excluded from the feature matrix X in both iterations.
-  # 
+  # Per supervisor guidance, Iteration 1 uses ONLY the 13 pure technical indicators
+  # derived from price and volume. All external market variables (VIX) are excluded
+  # from the baseline feature matrix.
+  #
+  # Non-stationary features (absolute price levels) have been removed or normalized:
+  #   - bb_mid, bb_upper, bb_lower removed (replaced by bb_pct and bb_width)
+  #   - macd_line, macd_signal, macd_hist normalized by Close price (expressed as %)
+  #   - atr_14 normalized by Close price (ATR%) using Wilder's smoothing
+  #
+  # VIX is used as GMM input for regime detection in Iteration 2 via
+  # train_data_full/val_data_full, but remains excluded from the feature matrix X
+  # in both iterations.
+  #
   # Note: Regime columns are NOT excluded here. They are added explicitly
   # in run_walk_forward_regime.py for iteration 2, and the walk-forward
   # module will naturally exclude them in iteration 1 since they don't exist yet.
@@ -108,32 +117,52 @@ models:
     - "label"
     - "label_binary"
     - "days_to_barrier"
-    - "ret_1d_forward"  # Used for backtesting only, not as a feature
+    - "ret_1d_forward"    # Used for backtesting only, not as a feature
+    - "ret_5d_forward"    # Used for labeling only, not as a feature
+    - "label_5d_binary"   # 5d direction label (not used as target anymore)
+    - "ret_10d_forward"   # Used for labeling only, not as a feature
+    - "label_10d_binary"  # Training target, not a feature
     # VIX variables (excluded from baseline, used for GMM in iteration 2)
     - "vix"
     - "vix_diff"
     - "vix_chg"
 
   # LightGBM configuration
+  # ~724 training samples per fold (3-year rolling window, SPY daily).
+  # n_estimators reduced 500→300: fewer trees sufficient for dataset this size;
+  #   avoids overfitting without early stopping.
+  # num_leaves reduced 31→20: limits tree complexity (rule of thumb: num_leaves
+  #   << n_samples^0.5 ≈ 27), reduces variance on small datasets.
+  # reg_lambda=1.0: L2 weight regularization to penalise large leaf scores.
+  # min_gain_to_split=0.01: minimum information gain required to make a split,
+  #   prevents splits that add negligible predictive value.
   lightgbm:
-    n_estimators: 500
+    n_estimators: 300
     learning_rate: 0.05
     max_depth: 6
-    num_leaves: 31
-    min_child_samples: 20
+    num_leaves: 20
+    min_child_samples: 50
     subsample: 0.8
     colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    min_gain_to_split: 0.01
     class_weight: "balanced"
     random_state: 42
 
   # Explainable Boosting Machine configuration
+  # ~724 training samples per fold (3-year rolling window, SPY daily).
+  # max_bins reduced 256→128: 256 bins on ~700 samples produces bins with <3
+  #   observations on average; 128 bins gives ~5-6 per bin, more stable splits.
+  # min_samples_leaf increased 2→10: prevents shape function estimation from
+  #   single data points; ~1.4% of fold size, consistent with literature.
   ebm:
-    max_bins: 256
+    max_bins: 128
     max_interaction_bins: 32
-    interactions: 10
+    interactions: 5
     learning_rate: 0.01
-    max_rounds: 5000
-    min_samples_leaf: 2
+    max_rounds: 3000
+    min_samples_leaf: 10
     random_state: 42
 
   # RuleFit configuration
