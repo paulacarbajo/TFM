@@ -34,7 +34,7 @@ from pathlib import Path
 from loguru import logger
 import numpy as np
 import pandas as pd
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, roc_auc_score
 from interpret.glassbox import ExplainableBoostingClassifier
 
 from src.ingestion.loader import DataLoader
@@ -167,34 +167,38 @@ def process_fold(fold_data, config, trainer, temperatures):
     logger.info("\n--- STEP 3: Training EBM Distilled Models ---")
     ebm_distilled_models = {}
     distilled_val_accuracy = {}
-    
+    distilled_val_auc = {}
+
     for T in temperatures:
         logger.info(f"\nTemperature T={T}:")
-        
+
         # Compute soft labels with this temperature
         soft_labels = compute_soft_labels(teacher_proba, T)
         logger.info(f"  Soft labels: min={soft_labels.min():.4f}, "
                    f"max={soft_labels.max():.4f}, mean={soft_labels.mean():.4f}")
-        
+
         # Train EBM distilled
         ebm_model = train_ebm_distilled(
             X_train_clean, soft_labels, config, fold_number, T
         )
-        
-        # Evaluate on validation set using hard labels
+
+        # Evaluate on validation set
         ebm_val_pred = ebm_model.predict(X_val_clean)
+        ebm_val_proba = ebm_model.predict_proba(X_val_clean)[:, 1]
         ebm_val_acc = accuracy_score(y_val_binary, ebm_val_pred)
-        
-        logger.info(f"  EBM distilled (T={T}) validation accuracy: {ebm_val_acc:.4f}")
-        
+        ebm_val_auc = roc_auc_score(y_val_binary, ebm_val_proba)
+
+        logger.info(f"  EBM distilled (T={T}) — Accuracy: {ebm_val_acc:.4f}  AUC: {ebm_val_auc:.4f}")
+
         ebm_distilled_models[T] = ebm_model
         distilled_val_accuracy[T] = ebm_val_acc
-    
+        distilled_val_auc[T] = ebm_val_auc
+
     # Step 4: Log fold summary
     logger.info("\n--- FOLD SUMMARY ---")
     logger.info(f"LightGBM teacher:     {lgbm_val_accuracy:.4f}")
     for T in temperatures:
-        logger.info(f"EBM distilled (T={T}):  {distilled_val_accuracy[T]:.4f}")
+        logger.info(f"EBM distilled (T={T}):  Acc={distilled_val_accuracy[T]:.4f}  AUC={distilled_val_auc[T]:.4f}")
     
     return {
         'fold_number': fold_number,
@@ -206,6 +210,7 @@ def process_fold(fold_data, config, trainer, temperatures):
         'ebm_distilled_models': ebm_distilled_models,
         'lightgbm_val_accuracy': lgbm_val_accuracy,
         'distilled_val_accuracy': distilled_val_accuracy,
+        'distilled_val_auc': distilled_val_auc,
         'X_val': X_val,
         'y_val': y_val,
         'y_val_binary': y_val_binary,
@@ -215,53 +220,43 @@ def process_fold(fold_data, config, trainer, temperatures):
 
 def select_best_temperature(all_fold_results, temperatures):
     """
-    Select best temperature based on mean validation accuracy across folds.
-    
-    Args:
-        all_fold_results: List of fold result dictionaries
-        temperatures: List of temperatures searched
-        
-    Returns:
-        Tuple of (best_T, T_accuracy_summary dict)
+    Select best temperature based on mean validation AUC across folds.
+    AUC is preferred over accuracy: threshold-independent and more robust with class imbalance.
+    Returns (best_T, T_summary dict with mean/std for both AUC and accuracy).
     """
     logger.info("\n" + "=" * 80)
-    logger.info("TEMPERATURE SELECTION")
+    logger.info("TEMPERATURE SELECTION (criterion: mean validation AUC)")
     logger.info("=" * 80)
-    
-    # Compute mean accuracy per temperature
-    T_accuracy_summary = {}
-    
+
+    T_summary = {}
+
     for T in temperatures:
-        accuracies = [fold['distilled_val_accuracy'][T] for fold in all_fold_results]
-        mean_acc = np.mean(accuracies)
-        std_acc = np.std(accuracies)
-        T_accuracy_summary[T] = {
-            'mean': mean_acc,
-            'std': std_acc,
-            'accuracies': accuracies
+        aucs = [fold['distilled_val_auc'][T] for fold in all_fold_results]
+        accs = [fold['distilled_val_accuracy'][T] for fold in all_fold_results]
+        T_summary[T] = {
+            'mean_auc':  np.mean(aucs),
+            'std_auc':   np.std(aucs),
+            'aucs':      aucs,
+            'mean_acc':  np.mean(accs),
+            'std_acc':   np.std(accs),
         }
-    
-    # Select best temperature
-    best_T = max(T_accuracy_summary.keys(), key=lambda t: T_accuracy_summary[t]['mean'])
-    
-    # Log summary table
-    logger.info("\nValidation Accuracy by Temperature (mean ± std across folds):")
-    logger.info("-" * 80)
-    logger.info(f"{'Temperature':<15} {'Mean Accuracy':<20} {'Std':<15} {'Best':<10}")
-    logger.info("-" * 80)
-    
+
+    # Select best temperature by mean AUC
+    best_T = max(T_summary.keys(), key=lambda t: T_summary[t]['mean_auc'])
+
+    logger.info(f"\n{'Temperature':<15} {'Mean AUC':<14} {'Std AUC':<12} {'Mean Acc':<12} {'Best'}")
+    logger.info("-" * 65)
     for T in sorted(temperatures):
-        summary = T_accuracy_summary[T]
-        is_best = " ← BEST" if T == best_T else ""
+        s = T_summary[T]
+        marker = " ← BEST" if T == best_T else ""
         logger.info(
-            f"T={T:<13} {summary['mean']:<20.4f} {summary['std']:<15.4f} {is_best}"
+            f"T={T:<13} {s['mean_auc']:<14.4f} {s['std_auc']:<12.4f} "
+            f"{s['mean_acc']:<12.4f}{marker}"
         )
-    
-    logger.info("-" * 80)
-    logger.info(f"\nSelected temperature: T={best_T}")
-    logger.info(f"Mean validation accuracy: {T_accuracy_summary[best_T]['mean']:.4f}")
-    
-    return best_T, T_accuracy_summary
+    logger.info("-" * 65)
+    logger.info(f"Selected temperature: T={best_T}  (mean AUC={T_summary[best_T]['mean_auc']:.4f})")
+
+    return best_T, T_summary
 
 
 def main():
@@ -321,7 +316,7 @@ def main():
         all_fold_results.append(fold_results)
     
     # Select best temperature
-    best_T, T_accuracy_summary = select_best_temperature(all_fold_results, temperatures)
+    best_T, T_summary = select_best_temperature(all_fold_results, temperatures)
     
     # Save results
     logger.info("\n" + "=" * 80)
@@ -333,7 +328,7 @@ def main():
     
     results = {
         'best_T': best_T,
-        'T_accuracy_summary': T_accuracy_summary,
+        'T_summary': T_summary,
         'all_fold_results': all_fold_results,
         'temperatures_searched': temperatures
     }
@@ -350,7 +345,7 @@ def main():
     logger.info(f"Total folds: {len(all_fold_results)}")
     logger.info(f"Temperatures searched: {temperatures}")
     logger.info(f"Best temperature: T={best_T}")
-    logger.info(f"Best mean validation accuracy: {T_accuracy_summary[best_T]['mean']:.4f}")
+    logger.info(f"Best mean validation AUC: {T_summary[best_T]['mean_auc']:.4f}")
     logger.info(f"Results saved: {output_path}")
     logger.info("=" * 80)
 

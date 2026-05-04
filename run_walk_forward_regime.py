@@ -123,7 +123,7 @@ def main():
             f"(+{X_train_r.shape[1] - X_train.shape[1]} regime features)"
         )
 
-        # Step 2: Update fold data with regime-enriched features
+        # Step 3: Update fold data with regime-enriched features
         fold_data_regime = fold_data.copy()
         fold_data_regime['X_train'] = X_train_r
         fold_data_regime['X_val'] = X_val_r
@@ -136,7 +136,7 @@ def main():
             f"{len(fold_data_regime['feature_names'])}"
         )
 
-        # Step 3: Train models with regime features
+        # Step 4: Train models with regime features
         logger.info("Training models with regime features...")
         fold_results = trainer.train_fold(fold_data_regime)
         fold_results['regime_detector'] = regime_detector

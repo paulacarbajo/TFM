@@ -83,7 +83,7 @@ models:
     train_window_years: 3   # Fixed training window size (rolling only)
     val_window_years: 1     # Validation window size
     label_column: "label_binary" # Training target (triple barrier: 1=take profit, -1=stop loss or time barrier)
-    ic_threshold: 0.02               # Min |Spearman IC| vs ret_10d_forward to keep a feature
+    ic_threshold: 0.01               # Min |Spearman IC| vs label_binary to keep a feature (lowered from 0.02: Spearman with binary target is systematically lower)
     ic_min_features: 6               # Always keep at least this many features
 
   # Columns excluded from the feature matrix X.
@@ -98,7 +98,7 @@ models:
   #
   # Non-stationary features (absolute price levels) have been removed or normalized:
   #   - bb_mid, bb_upper, bb_lower removed (replaced by bb_pct and bb_width)
-  #   - macd_line, macd_signal, macd_hist normalized by Close price (expressed as %)
+  #   - macd_line, macd_signal normalized by Close price (expressed as %); macd_hist excluded (identity)
   #   - atr_14 normalized by Close price (ATR%) using Wilder's smoothing
   #
   # VIX is used as GMM input for regime detection in Iteration 2 via

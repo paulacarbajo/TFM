@@ -3,16 +3,16 @@
 RuleFit Regime — Interpretable Rules from Regime-Aware LightGBM (2-stage distillation)
 
 Implements the full Iter2 distillation chain:
-    LightGBM Regime (teacher, 15 features)
-        → EBM Distilled Regime (student, 15 features, trained inline)
+    LightGBM Regime (teacher, 14 features)
+        → EBM Distilled Regime (student, 14 features, trained inline)
         → RuleFit (trained on EBM Distilled soft labels → explicit if-then rules)
 
 This mirrors the Iter1 chain (LightGBM → EBM Distilled → RuleFit) but with
-15 features (11 technical + 4 regime) instead of 11 technical features.
+14 features (10 technical + 4 regime) instead of 10 technical features.
 
-Features used (15):
-    11 technical: ret_5d, ret_21d, vol_20d, rsi_14, macd_line, macd_signal,
-                  macd_hist, bb_pct, bb_width, atr_14, volume_ratio
+Features used (14):
+    10 technical: ret_5d, ret_21d, vol_rel, rsi_14, macd_line, macd_signal,
+                  bb_pct, bb_width, atr_14, volume_direction
     4 regime (GMM, human-readable labels):
         regime        → regime_state  (0=Bull, 1=Neutral, 2=Bear)
         prob_bull     → regime_prob_0 (probability of Bull regime)
@@ -93,7 +93,7 @@ def main():
     logger.info("=" * 80)
     logger.info("RULEFIT REGIME: INTERPRETABLE RULES FROM REGIME-AWARE LIGHTGBM")
     logger.info("=" * 80)
-    logger.info("Chain: LightGBM Regime (15 features) → EBM Distilled Regime → RuleFit")
+    logger.info("Chain: LightGBM Regime (14 features) → EBM Distilled Regime → RuleFit")
     logger.info(f"Config: {args.config}  (suffix: '{suffix}')")
     logger.info(REGIME_LEGEND)
     logger.info("=" * 80)
@@ -222,7 +222,7 @@ def main():
     if result is None:
         raise RuntimeError("RuleFit training failed — check logs for details.")
 
-    rulefit_model, feature_mapping = result
+    rulefit_model, feature_mapping, rulefit_scaler = result
     logger.success("RuleFit trained successfully.")
 
     # ------------------------------------------------------------------
@@ -286,7 +286,7 @@ def main():
         oos_data[raw_feature_names].notna().all(axis=1)
     )
     oos_clean = oos_data[oos_valid]
-    X_oos = oos_clean[raw_feature_names].values
+    X_oos = rulefit_scaler.transform(oos_clean[raw_feature_names].values)
     y_oos = (oos_clean['label_binary'] == 1).astype(int).values
     returns_oos = oos_clean['ret_1d_forward'].values
 
@@ -324,6 +324,7 @@ def main():
         'feature_names': feature_names,
         'raw_feature_names': raw_feature_names,
         'feature_mapping': feature_mapping,
+        'rulefit_scaler': rulefit_scaler,
         'regime_legend': REGIME_LEGEND,
         'rules_df': rules_df,
         'top_rules': rule_part,

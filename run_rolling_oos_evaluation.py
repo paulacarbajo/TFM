@@ -12,11 +12,11 @@ This provides realistic evaluation by retraining quarterly on a rolling 3-year
 window, allowing the model to adapt to recent market conditions while maintaining
 consistent training data size.
 
-Trains exclusively on SPY (S&P 500 ETF) using 11 stationary technical features.
+Trains exclusively on SPY (S&P 500 ETF) using 10 stationary technical features.
 Both long-short (primary) and long-only (secondary) strategies are evaluated.
 
-Iteration 1: 11 pure technical features (baseline)
-Iteration 2: 11 technical + 4 regime features (GMM regime detection)
+Iteration 1: 10 pure technical features (baseline)
+Iteration 2: 10 technical + 4 regime features (GMM regime detection)
 """
 
 import argparse
@@ -97,7 +97,7 @@ def get_feature_columns(data_df, iteration):
     """
     Get feature columns for the given iteration.
     
-    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 11 features
+    Uses TECHNICAL_FEATURES list to ensure we use exactly the same 10 features
     as in walk_forward.py.
     
     Args:
@@ -209,7 +209,16 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
         (data.index.get_level_values('date') >= fold_info['train_start']) &
         (data.index.get_level_values('date') < fold_info['train_end'])
     ].copy()
-    
+
+    # Purge last max_holding_period trading days (López de Prado, AFML ch.7).
+    # Labels near the train/test boundary use prices that fall inside the test period.
+    purge_days = config.get('features', {}).get('triple_barrier', {}).get('max_holding_period', 8)
+    if purge_days > 0:
+        train_dates = sorted(train_data.index.get_level_values('date').unique())
+        if len(train_dates) > purge_days:
+            cutoff = train_dates[-purge_days]
+            train_data = train_data[train_data.index.get_level_values('date') < cutoff]
+
     test_data = data[
         (data.index.get_level_values('date') >= fold_info['test_start']) &
         (data.index.get_level_values('date') < fold_info['test_end'])
@@ -260,7 +269,7 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
     logger.info(f"Feature list: {feature_cols}")
 
     # ASSERTION: Verify feature count (skip for IS models — may use IC-selected subset)
-    expected_count = 11 if iteration == 1 else 15  # 11 technical, or 11 + 4 regime
+    expected_count = 10 if iteration == 1 else 14  # 10 technical, or 10 + 4 regime
     if is_models is None and len(feature_cols) != expected_count:
         error_msg = f"Feature count mismatch! Expected {expected_count}, got {len(feature_cols)}"
         logger.error(error_msg)
@@ -460,7 +469,7 @@ def main():
     logger.info("=" * 80)
     logger.info("Q1 2020: IS walk-forward models carried forward (no retraining)")
     logger.info("Q2 2020 onwards: quarterly retraining with 3-year rolling window")
-    logger.info("Training exclusively on SPY with 11 stationary technical features")
+    logger.info("Training exclusively on SPY with 10 stationary technical features")
     logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
     logger.info("=" * 80)
 
@@ -508,7 +517,7 @@ def main():
 
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
-        logger.info(f"ITERATION {iteration}: {'BASELINE (11 stationary technical features)' if iteration == 1 else 'WITH REGIME FEATURES (11 technical + 4 regime)'}")
+        logger.info(f"ITERATION {iteration}: {'BASELINE (10 stationary technical features)' if iteration == 1 else 'WITH REGIME FEATURES (10 technical + 4 regime)'}")
         logger.info(f"{'=' * 80}")
 
         is_models_iter = is_models_per_iter[iteration]
@@ -588,7 +597,7 @@ def main():
     print("=" * 80)
     
     for iteration in [1, 2]:
-        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE (11 features)' if iteration == 1 else 'WITH REGIME (11 + 4 features)'}")
+        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE (10 features)' if iteration == 1 else 'WITH REGIME (10 + 4 features)'}")
         print("-" * 80)
 
         agg = all_results[f'iteration_{iteration}']['aggregated']

@@ -9,8 +9,8 @@ Implements the final step of the two-stage distillation chain:
 
 RuleFit converts the soft knowledge captured by EBM Distilled into human-readable
 trading rules of the form:
-    IF rsi_14 > 68.5 AND vol_20d < 0.010  →  LONG  (coef=+0.31, support=18%)
-    IF macd_hist < -0.0008 AND bb_pct < 0.21  →  SHORT  (coef=-0.22, support=12%)
+    IF rsi_14 > 68.5 AND vol_rel < 1.05  →  LONG  (coef=+0.31, support=18%)
+    IF macd_line < -0.08 AND bb_pct < 0.21  →  SHORT  (coef=-0.22, support=12%)
 
 Training data: IS last fold (e.g. 2016-2019 for 2008 baseline).
 Evaluation: full OOS period 2020-2024.
@@ -175,7 +175,7 @@ def main():
     if result is None:
         raise RuntimeError("RuleFit training failed — check logs for details.")
 
-    rulefit_model, feature_mapping = result
+    rulefit_model, feature_mapping, rulefit_scaler = result
     logger.success("RuleFit trained successfully.")
 
     # ------------------------------------------------------------------
@@ -242,7 +242,7 @@ def main():
         oos_data[feature_names].notna().all(axis=1)
     )
     oos_clean = oos_data[oos_valid]
-    X_oos = oos_clean[feature_names].values
+    X_oos = rulefit_scaler.transform(oos_clean[feature_names].values)
     y_oos = (oos_clean['label_binary'] == 1).astype(int).values
     returns_oos = oos_clean['ret_1d_forward'].values
 
@@ -280,6 +280,7 @@ def main():
         'train_end': train_end,
         'feature_names': feature_names,
         'feature_mapping': feature_mapping,
+        'rulefit_scaler': rulefit_scaler,
         'rules_df': rules_df,
         'top_rules': rule_part,
         'linear_terms': linear_part,

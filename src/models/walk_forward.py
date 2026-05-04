@@ -36,52 +36,27 @@ from scipy.stats import spearmanr
 from loguru import logger
 
 
-# Canonical 11-feature set used by all training scripts.
+# Canonical 10-feature set used by all training scripts.
 # Order is fixed here — get_feature_names preserves this order regardless
 # of column order in the input DataFrame.
 TECHNICAL_FEATURES = [
     'ret_5d', 'ret_21d',                                    # momentum
-    'vol_20d', 'atr_14',                                    # volatility
+    'vol_rel', 'atr_14',                                    # volatility (vol_rel = vol_20d/vol_60d)
     'rsi_14',                                               # oscillator
-    'macd_line', 'macd_signal', 'macd_hist',                # trend
+    'macd_line', 'macd_signal',                             # trend (macd_hist excluded: identity of line - signal)
     'bb_pct', 'bb_width',                                   # bands
-    'volume_ratio',                                         # volume
+    'volume_direction',                                     # directional volume (volume_ratio × sign(ret_1d))
+    # vol_20d excluded: barrier width in triple-barrier → mechanical correlation with label_binary
 ]
 
 
 class WalkForwardCV:
     """
-    Rolling-window walk-forward cross-validation for time series data.
-
-    Each fold has a fixed-size training window that slides forward by one
-    year, followed by a non-overlapping validation window of the same step
-    size.  Feature selection (optional IC threshold) is applied per fold
-    using only the training slice.
-
-    Attributes:
-        config (Dict[str, Any]):     Full configuration dictionary.
-        train_start (pd.Timestamp):  First date of the first training fold.
-        train_end (pd.Timestamp):    Last date covered by walk-forward folds
-                                     (exclusive upper bound for val windows).
-        test_start (pd.Timestamp):   Start of the held-out OOS period.
-        test_end (pd.Timestamp):     End of the held-out OOS period.
-        window_type (str):           'rolling' (only supported value).
-        train_window_years (int):    Training window size in years.
-        val_window_years (int):      Validation window size in years.
-        label_column (str):          Target column name (default 'label_binary').
-        ic_threshold (float):        Minimum |IC| for feature selection (0 = all).
-        ic_min_features (int):       Minimum features to keep even if below threshold.
-        exclude_from_features (list): Columns always excluded from X.
+    Rolling-window walk-forward CV. Fixed training window slides forward one
+    year per fold. Optional IC feature selection on training slice only.
     """
 
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialise WalkForwardCV from the project configuration.
-
-        Args:
-            config: Configuration dictionary.  Reads 'models.walk_forward'
-                    for date ranges, window parameters, and IC settings.
-        """
         self.config = config
         models_config = config.get('models', {})
         wf_config     = models_config.get('walk_forward', {})
@@ -100,9 +75,17 @@ class WalkForwardCV:
             'label', 'label_binary',
         ])
 
-        self.label_column   = wf_config.get('label_column', 'label_binary')
-        self.ic_threshold   = wf_config.get('ic_threshold', 0.0)
+        self.label_column    = wf_config.get('label_column', 'label_binary')
+        self.ic_threshold    = wf_config.get('ic_threshold', 0.0)
         self.ic_min_features = wf_config.get('ic_min_features', 6)
+
+        # Purge: remove last max_holding_period trading days from training fold
+        # to prevent label overlap with the validation period (López de Prado, AFML ch.7).
+        self.purge_days = (
+            config.get('features', {})
+                  .get('triple_barrier', {})
+                  .get('max_holding_period', 0)
+        )
 
         logger.info("WalkForwardCV initialised")
         logger.info(
@@ -117,7 +100,8 @@ class WalkForwardCV:
         logger.info(
             f"Label: {self.label_column}  |  "
             f"IC threshold: {self.ic_threshold}  |  "
-            f"IC min features: {self.ic_min_features}"
+            f"IC min features: {self.ic_min_features}  |  "
+            f"Purge days: {self.purge_days}"
         )
 
     # ------------------------------------------------------------------
@@ -126,24 +110,9 @@ class WalkForwardCV:
 
     def get_feature_names(self, data: pd.DataFrame) -> List[str]:
         """
-        Return the active feature columns in canonical order.
-
-        Iterates over the module-level ``TECHNICAL_FEATURES`` list (not over
-        ``data.columns``) so that the returned order is always identical
-        regardless of column ordering in the input DataFrame.  Consistent
-        feature order is required for reproducible SHAP values and for
-        correct alignment between SHAP arrays and feature name lists.
-
-        VIX, sma_200_dist, ret_1d, and all FRED-derived columns are excluded:
-        - ``vix``: used by RegimeDetector only, not in model X.
-        - ``sma_200_dist``: not in the tutor-approved 11-feature set.
-        - ``ret_1d``: IC too low; intermediate for vol_20d only.
-
-        Args:
-            data: DataFrame whose columns are checked for availability.
-
-        Returns:
-            Ordered list of feature column names (subset of TECHNICAL_FEATURES).
+        Return active feature columns in canonical TECHNICAL_FEATURES order.
+        Iterates TECHNICAL_FEATURES (not data.columns) for stable order across folds.
+        Excluded: vix (GMM only), sma_200_dist, ret_1d (intermediate for vol_20d/volume_direction).
         """
         # Canonical order: iterate TECHNICAL_FEATURES, not data.columns
         feature_columns = [col for col in TECHNICAL_FEATURES if col in data.columns]
@@ -161,28 +130,11 @@ class WalkForwardCV:
         feature_columns: List[str],
     ) -> List[str]:
         """
-        Filter features by Information Coefficient (Spearman |IC| with
-        ret_10d_forward) computed on the training slice only.
-
-        IC target: ``ret_10d_forward`` (continuous 10-day forward return) is
-        used instead of binary ``label_binary`` because Spearman correlation
-        with a continuous target is more discriminative than with a ±1 label.
-        The 10-day horizon matches the triple-barrier max_holding_period.
-
-        Only training data is passed in — no look-ahead bias.
-
-        If ``ic_threshold == 0.0`` (default) every feature has |IC| ≥ 0,
-        so all features pass and this method is a no-op (gated by the caller).
-
-        Args:
-            data:            Training slice (full DataFrame, before NaN removal).
-            feature_columns: Candidate feature names in canonical order.
-
-        Returns:
-            Filtered list of feature names with |IC| ≥ ic_threshold, or the
-            top ic_min_features if fewer pass the threshold.
+        Filter features by Spearman |IC| vs label_binary on training data only.
+        ic_threshold=0.01 (lower than typical 0.02 because binary target yields lower IC).
+        Falls back to top ic_min_features if fewer than ic_min_features pass.
         """
-        target_col = 'ret_10d_forward'
+        target_col = 'label_binary'
 
         if target_col not in data.columns:
             logger.warning(
@@ -232,38 +184,40 @@ class WalkForwardCV:
         start_date: pd.Timestamp,
         end_date: pd.Timestamp,
     ) -> pd.DataFrame:
-        """
-        Return rows where start_date <= date < end_date (end is exclusive).
-
-        The exclusive end means train_end == val_start produces zero overlap
-        between consecutive windows — the no-look-ahead guarantee.
-
-        Args:
-            data:       MultiIndex (ticker, date) DataFrame.
-            start_date: Inclusive lower bound.
-            end_date:   Exclusive upper bound.
-
-        Returns:
-            Filtered copy of data.
-        """
+        """Return rows where start_date <= date < end_date (end exclusive, no overlap)."""
         dates = data.index.get_level_values('date')
         return data[(dates >= start_date) & (dates < end_date)].copy()
 
+    def _purge_train(self, train_data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Remove the last purge_days trading days from the training fold.
+        Prevents label overlap with the validation period — a label computed at
+        t uses prices up to t + max_holding_period, which may fall inside val.
+        López de Prado, AFML ch.7.
+        """
+        if self.purge_days <= 0:
+            return train_data
+
+        dates = train_data.index.get_level_values('date')
+        unique_dates = sorted(dates.unique())
+
+        if len(unique_dates) <= self.purge_days:
+            logger.warning(
+                f"Purge days ({self.purge_days}) >= training dates "
+                f"({len(unique_dates)}) — skipping purge"
+            )
+            return train_data
+
+        cutoff = unique_dates[-self.purge_days]
+        purged = train_data[dates < cutoff]
+        logger.debug(
+            f"Purged last {self.purge_days} trading days  |  "
+            f"rows: {len(train_data)} → {len(purged)}"
+        )
+        return purged
+
     def _get_fold_dates(self) -> List[Dict[str, pd.Timestamp]]:
-        """
-        Compute train/val date ranges for each walk-forward fold.
-
-        Rolling window only: training window of fixed size slides forward
-        by ``val_window_years`` per fold.  Generation stops when the
-        validation window would exceed ``train_end``.
-
-        Returns:
-            List of dicts with keys: fold, train_start, train_end,
-            val_start, val_end.
-
-        Raises:
-            NotImplementedError: If window_type is not 'rolling'.
-        """
+        """Compute train/val date ranges for each fold. Only 'rolling' window is supported."""
         if self.window_type != 'rolling':
             raise NotImplementedError(
                 f"window_type='{self.window_type}' is not supported.  "
@@ -306,25 +260,7 @@ class WalkForwardCV:
         data: pd.DataFrame,
         feature_columns: List[str],
     ) -> Tuple[pd.DataFrame, pd.Series]:
-        """
-        Extract X and y, dropping rows where either is NaN.
-
-        NaN rows arise from two sources:
-        - EWM warmup: first row(s) of vol_20d are NaN.
-        - Near-end rows: last rows of ret_10d_forward / label_binary are NaN
-          because no future data exists within max_holding_period.
-
-        Both target-NaN and feature-NaN rows are dropped in a single pass
-        to avoid redundant mask computation.
-
-        Args:
-            data:            Filtered DataFrame (single fold window).
-            feature_columns: Ordered feature column names.
-
-        Returns:
-            (X, y) with the same index (MultiIndex preserved for backtest
-            alignment).
-        """
+        """Extract X and y, dropping NaN rows (EWM warmup + near-end label NaNs)."""
         X = data[feature_columns]
         y = data[self.label_column]
 
@@ -340,29 +276,11 @@ class WalkForwardCV:
         data: pd.DataFrame,
     ) -> Generator[Dict[str, Any], None, None]:
         """
-        Generate train/validation splits for walk-forward CV.
-
-        At each fold:
-        1. Date windows are computed by ``_get_fold_dates()``.
-        2. Optional IC-based feature selection on the training slice.
-        3. NaN rows are removed from both sets.
-        4. The full (unfiltered) DataFrames are also yielded as
-           ``train_data_full`` / ``val_data_full`` for use by the
-           RegimeDetector (which needs 'vix' and 'ret_1d', absent from X).
-
-        Yielded dict keys
-        -----------------
-        fold_number, train_start, train_end, val_start, val_end,
-        X_train, y_train, X_val, y_val,
-        train_dates, val_dates, feature_names,
-        train_data_full, val_data_full
-
-        Args:
-            data: MultiIndex (ticker, date) DataFrame from
-                  ``DataLoader.load_engineered_features()``.
-
-        Yields:
-            One dict per fold.
+        Yield one dict per fold with keys:
+            fold_number, train_start, train_end, val_start, val_end,
+            X_train, y_train, X_val, y_val, train_dates, val_dates,
+            feature_names, train_data_full, val_data_full.
+        train_data_full/val_data_full include vix and ret_1d for RegimeDetector.
         """
         logger.info("=" * 80)
         logger.info("WALK-FORWARD CROSS-VALIDATION")
@@ -388,6 +306,7 @@ class WalkForwardCV:
             train_data = self._filter_by_date(
                 data, fold_info['train_start'], fold_info['train_end']
             )
+            train_data = self._purge_train(train_data)
             val_data = self._filter_by_date(
                 data, fold_info['val_start'], fold_info['val_end']
             )
@@ -444,15 +363,7 @@ class WalkForwardCV:
         self,
         data: pd.DataFrame,
     ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-        """
-        Extract the held-out OOS test set (never seen during training).
-
-        Args:
-            data: MultiIndex (ticker, date) DataFrame.
-
-        Returns:
-            Tuple (X_test, y_test, feature_names) with NaN rows removed.
-        """
+        """Return (X_test, y_test, feature_names) for the held-out OOS period."""
         logger.info("=" * 80)
         logger.info(
             f"OOS TEST DATA  |  "
@@ -477,12 +388,7 @@ class WalkForwardCV:
         return X_test, y_test, feature_columns
 
     def get_summary(self) -> Dict[str, Any]:
-        """
-        Return a serialisable summary of the walk-forward configuration.
-
-        Returns:
-            Dict with window type, date ranges, fold count, and per-fold dates.
-        """
+        """Return serialisable summary of the walk-forward configuration and fold dates."""
         fold_dates = self._get_fold_dates()
 
         return {

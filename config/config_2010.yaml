@@ -75,7 +75,7 @@ models:
     train_window_years: 3
     val_window_years: 1
     label_column: "label_binary" # Training target (triple barrier: 1=take profit, -1=stop loss or time barrier)
-    ic_threshold: 0.02
+    ic_threshold: 0.01  # lowered from 0.02: Spearman with binary target is systematically lower
     ic_min_features: 6
 
   exclude_from_features:

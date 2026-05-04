@@ -300,7 +300,7 @@ df_spy_regime = df_oos_regime[spy_mask_regime].copy()
 valid_mask_regime = df_spy_regime[feature_names_regime].notna().all(axis=1) & df_spy_regime['label_binary'].notna()
 df_spy_regime = df_spy_regime[valid_mask_regime]
 
-# Get features (15 features: 11 technical + 4 regime)
+# Get features (14 features: 10 technical + 4 regime)
 X_spy_regime = df_spy_regime[feature_names_regime].reset_index(drop=True)
 y_spy_regime = df_spy_regime['label_binary'].reset_index(drop=True)
 
@@ -444,7 +444,7 @@ OUTPUTS:
 
 REGIME FEATURE IMPORTANCE:
 Check the plots to see how regime_state, regime_prob_0, regime_prob_1, and
-regime_prob_2 rank among the 15 features in driving predictions.
+regime_prob_2 rank among the 14 features in driving predictions.
 """)
 print("="*80)
 

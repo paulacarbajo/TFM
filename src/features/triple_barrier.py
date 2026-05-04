@@ -1,78 +1,22 @@
 """
-Triple Barrier Labeling Module
-================================
+Triple Barrier Labeling — López de Prado (AFML, 2018, Chapter 3).
 
-Generates trade labels using the triple-barrier method of López de Prado
-(Advances in Financial Machine Learning, 2018, Chapter 3).
+Called by main.py (Step 6) after feature engineering. Appends label,
+label_binary, and days_to_barrier to the DataFrame persisted in HDF5.
+All training scripts use label_binary as the target y.
 
-Role in the pipeline
---------------------
-Called by ``main.py`` as Step 6, immediately after feature engineering.
-Appends three columns — ``label``, ``label_binary``, ``days_to_barrier`` —
-to the DataFrame that is then persisted to HDF5 under ``engineered_features``.
-All training scripts use ``label_binary`` as the target variable **y**.
+For each bar, the first of three barriers touched within max_holding_period days:
+    Upper (take profit): Close[t] × (1 + k × vol_20d[t])
+    Lower (stop loss):   Close[t] × (1 − k × vol_20d[t])
+    Time barrier:        max_holding_period trading days  → label = 0
 
-Why triple barrier instead of a fixed-horizon direction label?
----------------------------------------------------------------
-A simple label like ``label_10d_binary = sign(ret_10d_forward)`` evaluates
-the trade outcome at a fixed horizon (day 10) regardless of what happened in
-between.  Problems:
+Binary collapse (tutor specification):
+    label = +1 → label_binary = +1
+    label = -1 → label_binary = -1
+    label =  0 → label_binary = -1   (time barrier treated as loss)
 
-1. **Path blindness** — a trade that returned −20 % on day 9 and recovered to
-   +0.1 % on day 10 would be labeled +1 (profitable), masking the drawdown.
-
-2. **No risk control** — a real systematic strategy always has a stop-loss.
-   Ignoring it produces over-optimistic labels that cannot be replicated in
-   live trading.
-
-3. **Arbitrary horizon** — selecting 10 days is arbitrary and bakes in an
-   assumption about the regime (trending vs mean-reverting).
-
-The triple barrier evaluates each observation against two dynamic barriers
-(based on current realized volatility) and a time barrier:
-- **Upper barrier** (take profit) = entry price × (1 + k × vol_20d)
-- **Lower barrier** (stop loss)   = entry price × (1 − k × vol_20d)
-- **Time barrier**                = max_holding_period trading days
-
-The label is assigned to whichever is touched first.
-
-Parameter choices (from config)
---------------------------------
-- **k = 1.0 (vol_multiplier)** — barriers set at ±1 standard deviation of
-  realized volatility.  Tutor specification.  A smaller k produces narrower
-  barriers, more stop-losses, and a noisier label.  A larger k produces
-  labels that fire less frequently.
-- **max_holding_period = 8 days** — upper bound on trade duration.  Short
-  enough to stay in the tactical horizon of the technical indicators used
-  (RSI-14, MACD-12/26) while long enough for vol_20d to produce meaningful
-  barriers.
-
-Binary label design decision
-------------------------------
-``label_binary`` collapses the ternary label:
-    label =  1  →  label_binary =  1   (take profit)
-    label = -1  →  label_binary = -1   (stop loss)
-    label =  0  →  label_binary = -1   (time barrier → treated as loss)
-
-Rationale: collapsing time barrier into -1 reflects a conservative assumption:
-a trade that failed to reach the take-profit within the holding period did not
-deliver the expected alpha.  Treating it as −1 rather than 0 slightly increases
-the negative class weight, which is appropriate given that a real strategy
-incurs opportunity cost (capital tied up, transaction costs) even when the
-time barrier fires without a loss.  Tutor specification.
-
-NaN handling
--------------
-The first row of vol_20d is NaN (EWM std of a single observation is
-undefined).  Rows where vol_20d is NaN receive ``label = NaN`` and
-``label_binary = NaN`` — they are excluded from training automatically by
-pandas ``dropna()`` in the training scripts.
-
-Near-end rows (last ``max_holding_period`` rows) receive a label based on a
-truncated future window; these tend to be labeled 0 (time barrier) more
-frequently than earlier rows because fewer future prices are available.
-Training scripts that use a strict train/validation split are unaffected
-since these rows fall inside the validation period.
+Parameters (config): k=1.0 (vol_multiplier), max_holding_period=8 days.
+NaN vol_20d rows receive NaN labels and are dropped by training scripts.
 """
 
 from typing import Dict, Any, Tuple
@@ -83,40 +27,13 @@ from loguru import logger
 
 class TripleBarrierLabeler:
     """
-    Labels financial time series using the triple-barrier method.
-
-    For each observation at time t, three barriers are defined:
-    - Upper barrier: Close[t] × (1 + k × vol_20d[t])
-    - Lower barrier: Close[t] × (1 − k × vol_20d[t])
-    - Time barrier: max_holding_period trading days
-
-    The barrier touched first determines the ternary label:
-        label = +1   upper touched first  (take profit)
-        label = -1   lower touched first  (stop loss)
-        label =  0   time expires first   (no clear signal)
-
-    The binary label (used as model target y):
-        label_binary = +1   if label =  1
-        label_binary = -1   if label = -1 or 0
-
-    See module docstring for the full rationale.
-
-    Attributes:
-        config (Dict[str, Any]):  Configuration dictionary.
-        max_holding_period (int): Time barrier in trading days (default 8).
-        vol_multiplier (float):   Barrier width multiplier k (default 1.0).
-        min_ret (float):          Minimum absolute barrier width (default 0.0).
-                                  Ensures a non-zero barrier even when vol ≈ 0.
+    Labels each bar by the first barrier touched within max_holding_period days.
+    Barrier width = max(k × vol_20d, min_ret) — dynamic, volatility-scaled.
+    Output: label (ternary ±1/0), label_binary (±1), days_to_barrier.
     """
 
     def __init__(self, config: Dict[str, Any]):
-        """
-        Initialise TripleBarrierLabeler from the project configuration.
-
-        Args:
-            config: Configuration dictionary.  Reads 'features.triple_barrier'
-                    for max_holding_period, vol_multiplier, and min_ret.
-        """
+        """Reads max_holding_period, vol_multiplier, min_ret from config['features']['triple_barrier']."""
         self.config = config
         features_config = config.get('features', {})
         tb_config = features_config.get('triple_barrier', {})
@@ -148,21 +65,8 @@ class TripleBarrierLabeler:
         volatility: float
     ) -> int:
         """
-        Determine the label for a single observation (scalar, non-vectorized).
-
-        This is a reference implementation for debugging and unit testing.
-        The main pipeline uses ``label_ticker_data`` (NumPy vectorized) for
-        performance.  Both functions implement identical logic and must return
-        the same ternary label for any valid input.
-
-        Args:
-            close_prices: Full Close price series for the ticker.
-            current_idx:  Integer position of the observation in close_prices.
-            current_price: Close price at current_idx.
-            volatility:   vol_20d value at current_idx (EWM std of ret_1d).
-
-        Returns:
-            +1 (upper barrier), −1 (lower barrier), or 0 (time barrier).
+        Scalar reference implementation for debugging. Returns +1, -1, or 0.
+        Production pipeline uses label_ticker_data (NumPy vectorized).
         """
         threshold = max(volatility * self.vol_multiplier, self.min_ret)
         upper_barrier = current_price * (1 + threshold)
@@ -188,35 +92,9 @@ class TripleBarrierLabeler:
     ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
         """
         Apply triple-barrier labeling to a single ticker (NumPy vectorized).
-
-        Vectorization approach
-        ~~~~~~~~~~~~~~~~~~~~~~
-        For each bar i the future price window is ``close[i+1 : i+H+1]`` where
-        H = max_holding_period.  ``np.where(future >= upper)`` and
-        ``np.where(future <= lower)`` return arrays of crossing indices.
-        The sentinel value ``n`` (total series length) is used to represent
-        "never crossed" — it is always larger than any valid crossing index
-        (which is bounded by H ≤ 8 < n), so comparisons with ``<`` work
-        correctly without a special-case branch.
-
-        Binary label collapse
-        ~~~~~~~~~~~~~~~~~~~~~
-        ``label_binary`` is derived after the full ternary array is computed:
-            label_binary = np.where(labels == 1, 1, -1)
-        NaN propagation is applied in a second pass so that rows with NaN vol
-        receive NaN in both label and label_binary.
-
-        Args:
-            ticker_data: Single-ticker DataFrame containing 'Close' and 'vol_20d'.
-
-        Returns:
-            Tuple of:
-            - DataFrame with 'label', 'label_binary', 'days_to_barrier' added.
-            - Stats dict: take_profit, stop_loss, time_barrier, total_valid,
-              avg_days_to_barrier.
-
-        Raises:
-            ValueError: If 'vol_20d' is absent (feature engineering not run).
+        Sentinel n represents "barrier never crossed" — always > any valid crossing index.
+        Returns (DataFrame with label/label_binary/days_to_barrier, stats dict).
+        Raises ValueError if 'vol_20d' is absent.
         """
         result = ticker_data.copy()
 
@@ -310,26 +188,8 @@ class TripleBarrierLabeler:
 
     def label_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        Apply triple-barrier labeling to all tickers in the dataset.
-
-        Each ticker is labeled independently (no look-ahead across tickers).
-        Aggregated statistics are logged so that parameter quality can be
-        assessed without re-running the full pipeline.
-
-        Time-barrier warning threshold
-        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        If the time barrier fires in >40 % of cases the current parameters
-        may be too tight (k too large, max_holding too short) or the regime
-        is strongly mean-reverting.  A warning is emitted per ticker and
-        for the overall dataset.
-
-        Args:
-            data: MultiIndex (ticker, date) DataFrame with 'Close' and
-                  'vol_20d' columns (output of FeatureEngineer).
-
-        Returns:
-            MultiIndex (ticker, date) DataFrame with 'label', 'label_binary',
-            and 'days_to_barrier' columns appended.
+        Apply triple-barrier labeling to all tickers independently.
+        Logs per-ticker and overall label distribution. Warns if time barrier > 40%.
         """
         logger.info("=" * 60)
         logger.info("TRIPLE BARRIER LABELING")
@@ -438,16 +298,7 @@ class TripleBarrierLabeler:
     # ------------------------------------------------------------------
 
     def get_label_summary(self, data: pd.DataFrame) -> Dict[str, Any]:
-        """
-        Return a label distribution summary for an already-labeled DataFrame.
-
-        Args:
-            data: MultiIndex (ticker, date) DataFrame with 'label' and
-                  'label_binary' columns.
-
-        Returns:
-            Dictionary with overall and per-ticker ternary/binary distributions.
-        """
+        """Return overall and per-ticker ternary/binary label distribution."""
         summary: Dict[str, Any] = {
             'total_observations':       len(data),
             'missing_labels':           int(data['label'].isna().sum()),

@@ -59,3 +59,6 @@ ENV/
 
 # Test files
 test_*.py
+
+# Claude Code session data
+.claude/

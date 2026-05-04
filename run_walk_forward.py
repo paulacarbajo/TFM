@@ -1,7 +1,7 @@
 """
 Run complete walk-forward cross-validation.
 
-Trains LightGBM and EBM on all folds and evaluates performance.
+Trains LightGBM on all folds. EBM and RuleFit are trained separately via distillation scripts.
 Results are saved to data/processed/walk_forward_results.pkl.
 """
 

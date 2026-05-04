@@ -1,20 +1,14 @@
 """
-Main Entry Point for Data Ingestion and Feature Engineering Pipeline
+Main Entry Point — Data Ingestion and Feature Engineering Pipeline
 
-Orchestrates the full data preparation pipeline:
-1. Download market data from yfinance (SPY, 2004-2024)
-2. Download macroeconomic data from FRED (VIX / VIXCLS)
-3. Align yfinance and FRED data via inner join on trading dates
-4. Save raw aligned data to HDF5
-5. Calculate 11 stationary technical features (momentum, volatility, RSI,
-   normalized MACD, Bollinger %B and width, normalized ATR%, volume ratio,
-   trend distance)
-6. Apply triple barrier labeling (ternary label + binary collapse)
-7. Save final labeled dataset to HDF5
-
-Output: data/processed/assets.h5 with two keys:
-- data_raw: aligned OHLCV + FRED data before feature engineering
-- engineered_features: full dataset with technical features and labels
+Steps:
+1. Download SPY OHLCV from yfinance (2004-2024)
+2. Download VIX from FRED
+3. Align via inner join on trading dates
+4. Save raw aligned data to HDF5 (key: data_raw)
+5. Compute 10 stationary technical features
+6. Apply triple barrier labeling (ternary ±1/0 + binary collapse to ±1)
+7. Save labeled dataset to HDF5 (key: engineered_features)
 """
 
 import sys
@@ -32,12 +26,7 @@ from src.features import FeatureEngineer, TripleBarrierLabeler
 
 
 def setup_logging() -> None:
-    """
-    Configure loguru logging to console and rotating file.
-
-    Console: INFO level with colour formatting.
-    File: DEBUG level, daily rotation, 30-day retention.
-    """
+    """Configure loguru: INFO to console, DEBUG to rotating file (30-day retention)."""
     logger.remove()
     logger.add(
         sys.stdout,
@@ -58,12 +47,7 @@ def setup_logging() -> None:
 
 
 def print_summary(summary: dict) -> None:
-    """
-    Log alignment summary in a structured format.
-
-    Args:
-        summary: Dictionary from DataAligner.get_alignment_summary()
-    """
+    """Log alignment summary from DataAligner.get_alignment_summary()."""
     logger.info("=" * 80)
     logger.info("DATA ALIGNMENT SUMMARY")
     logger.info("=" * 80)
@@ -94,12 +78,7 @@ def print_summary(summary: dict) -> None:
 
 
 def main() -> int:
-    """
-    Execute the full data ingestion and feature engineering pipeline.
-
-    Returns:
-        0 on success, 1 on failure
-    """
+    """Execute the full data ingestion and feature engineering pipeline. Returns 0/1."""
     setup_logging()
 
     warnings.filterwarnings('ignore', category=FutureWarning)
@@ -280,7 +259,7 @@ def main() -> int:
         logger.info(f"Final shape:   {labeled_data.shape}")
         logger.info(
             f"Features:      {feature_summary['active_feature_count']} stationary "
-            f"technical indicators (11 baseline)"
+            f"technical indicators (10 baseline)"
         )
         logger.info(
             "Labels:        label (ternary: 1/-1/0) and "
