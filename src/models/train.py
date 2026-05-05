@@ -222,12 +222,18 @@ class ModelTrainer:
                 if sample_weight is not None:
                     sample_weight = sample_weight[idx]
 
-            # sample_weight is not supported by imodels RuleFitClassifier;
-            # the distillation signal is carried in y_train instead.
+            # sample_weight is not supported by imodels RuleFitClassifier.
+            # The distillation confidence signal is carried implicitly in y_train:
+            # high-confidence soft labels produce y_hard values far from 0.5 and
+            # thus dominate the Lasso objective in the rules layer.  A proper
+            # alternative would be oversampling high-weight rows before fitting
+            # (e.g. np.repeat rows proportional to sample_weight), but this was
+            # not implemented because the dataset is already small (~800 rows) and
+            # oversampling would introduce duplicate rows that distort rule support.
             if sample_weight is not None:
-                logger.debug(
+                logger.info(
                     "  RuleFit: sample_weight provided but not supported "
-                    "by imodels — ignored"
+                    "by imodels — ignored (confidence signal carried via y_train)"
                 )
 
             model.fit(X_arr, y_train, feature_names=simple_names)

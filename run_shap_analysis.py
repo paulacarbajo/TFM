@@ -44,6 +44,12 @@ print("="*80)
 # 1. LOAD TRAINED MODELS
 # ============================================================================
 print("\n[1] Loading trained models from last fold (most recent training data)...")
+# NOTE: Both config.yaml (fold 9) and config_2010.yaml (fold 7) share the same
+# last-fold training window (2016-2019 → val 2019-2020) due to the rolling-window
+# design. The SHAP results produced here are therefore identical for both configs.
+# This is structurally expected, not a bug. To obtain config-specific SHAP values
+# you would need to aggregate over earlier folds (e.g. folds with 2013-2016 data)
+# that are unique to config.yaml but not present in config_2010.yaml.
 
 with open(f'data/processed/walk_forward_results{suffix}.pkl', 'rb') as f:
     wf_results = pickle.load(f)

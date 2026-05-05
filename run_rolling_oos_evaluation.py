@@ -30,6 +30,7 @@ import numpy as np
 from datetime import datetime
 
 from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, brier_score_loss
+from sklearn.utils import resample
 
 from interpret.glassbox import ExplainableBoostingClassifier
 
@@ -43,6 +44,28 @@ warnings.filterwarnings('ignore', category=UserWarning)
 
 
 # TECHNICAL_FEATURES imported from src.models.walk_forward — single source of truth.
+
+
+def bootstrap_auc_ci(y_true, y_proba, n_boot=500, alpha=0.05, random_state=42):
+    """
+    Bootstrap 95% CI for ROC-AUC.  With ~60 obs per fold, the CI is wide
+    (~±0.10-0.12) and essential for interpreting fold-level AUC values.
+
+    Returns (lower, upper) at the (alpha/2, 1-alpha/2) percentiles.
+    Returns (nan, nan) if y_true has only one class (AUC undefined).
+    """
+    if len(np.unique(y_true)) < 2:
+        return np.nan, np.nan
+    rng = np.random.RandomState(random_state)
+    aucs = []
+    for _ in range(n_boot):
+        idx = resample(np.arange(len(y_true)), random_state=rng, stratify=y_true)
+        if len(np.unique(y_true[idx])) < 2:
+            continue
+        aucs.append(roc_auc_score(y_true[idx], y_proba[idx]))
+    if not aucs:
+        return np.nan, np.nan
+    return float(np.percentile(aucs, 100 * alpha / 2)), float(np.percentile(aucs, 100 * (1 - alpha / 2)))
 
 
 def create_rolling_oos_folds():
@@ -196,7 +219,7 @@ def load_is_last_fold_models(iteration, best_T, suffix=''):
     return None
 
 
-def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
+def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, best_threshold=0.50):
     """Train models for a single fold."""
     logger.info(f"\n{'=' * 80}")
     logger.info(f"FOLD {fold_info['fold_id']}: {fold_info['quarter_label']}")
@@ -262,6 +285,12 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
     if is_models is not None:
         feature_cols = is_models['feature_names']
         logger.info(f"First OOS fold: using IS feature set ({len(feature_cols)} features)")
+        # NOTE: The IS model may have fewer features than subsequent OOS folds if IC
+        # selection was applied during the IS walk-forward (e.g. macd_signal removed
+        # when IC < 0.01).  From Q2 2020 onwards, get_feature_columns returns the
+        # full fixed set (10 or 14 features) without IC filtering.  This one-fold
+        # feature-set discontinuity is intentional: the IS model is used as-is, and
+        # the new model retrained in Q2 2020 starts fresh with the full feature set.
     else:
         feature_cols = get_feature_columns(train_data, iteration)
 
@@ -337,7 +366,7 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
         # All other cases: train EBM distilled using lgbm_model soft labels.
         # For first OOS fold Iter 2 (no IS distilled): lgbm_model is the IS LightGBM,
         # so distillation still uses IS knowledge — consistent with tutor's design.
-        logger.info(f"Training EBM distilled (T={best_T})...")
+        logger.info(f"Training EBM distilled (T={best_T}, threshold={best_threshold:.2f})...")
         teacher_proba = lgbm_model.predict_proba(X_train)[:, 1]
 
         # Temperature scaling — best_T selected on IS period, no look-ahead
@@ -345,8 +374,26 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
         logits = np.log(p / (1 - p))
         soft_pos = 1 / (1 + np.exp(-logits / best_T))
 
-        y_hard = (soft_pos >= 0.5).astype(int)
-        sample_weight = np.abs(soft_pos - 0.5) * 2
+        # Confidence threshold filtering: discard ambiguous training observations.
+        # Filter is applied to raw teacher_proba (before temperature scaling) so
+        # that the confidence criterion is independent of the temperature parameter.
+        if best_threshold > 0.50:
+            thr_mask = (teacher_proba > best_threshold) | (teacher_proba < (1.0 - best_threshold))
+            n_kept = int(thr_mask.sum())
+            n_total = len(teacher_proba)
+            logger.info(
+                f"  Confidence filter: {n_kept}/{n_total} kept "
+                f"({n_total - n_kept} discarded, "
+                f"{100 * (n_total - n_kept) / n_total:.1f}%)"
+            )
+            X_fit = X_train[thr_mask]
+            soft_pos_fit = soft_pos[thr_mask]
+        else:
+            X_fit = X_train
+            soft_pos_fit = soft_pos
+
+        y_hard = (soft_pos_fit >= 0.5).astype(int)
+        sample_weight = np.abs(soft_pos_fit - 0.5) * 2
 
         ebm_config = config.get('models', {}).get('ebm', {})
         ebm_dist_model = ExplainableBoostingClassifier(
@@ -358,7 +405,7 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
             min_samples_leaf=ebm_config.get('min_samples_leaf', 10),
             random_state=ebm_config.get('random_state', 42)
         )
-        ebm_dist_model.fit(X_train, y_hard, sample_weight=sample_weight)
+        ebm_dist_model.fit(X_fit, y_hard, sample_weight=sample_weight)
         logger.success("EBM distilled trained")
     
     # Evaluate on test set (SPY only)
@@ -376,10 +423,14 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
     ebm_dist_pred_proba = ebm_dist_model.predict_proba(X_test_ticker)[:, 1]
     ebm_dist_pred = (ebm_dist_pred_proba >= 0.5).astype(int)
     
+    lgbm_auc_lo, lgbm_auc_hi = bootstrap_auc_ci(y_test_ticker, lgbm_pred_proba)
+    ebm_auc_lo,  ebm_auc_hi  = bootstrap_auc_ci(y_test_ticker, ebm_dist_pred_proba)
+
     results[ticker] = {
         'lightgbm': {
             'accuracy': accuracy_score(y_test_ticker, lgbm_pred),
             'roc_auc': roc_auc_score(y_test_ticker, lgbm_pred_proba),
+            'roc_auc_ci': (lgbm_auc_lo, lgbm_auc_hi),
             'f1': f1_score(y_test_ticker, lgbm_pred, zero_division=0),
             'brier_score': brier_score_loss(y_test_ticker, lgbm_pred_proba),
             'predictions': lgbm_pred,
@@ -388,6 +439,7 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
         'ebm_distilled': {
             'accuracy': accuracy_score(y_test_ticker, ebm_dist_pred),
             'roc_auc': roc_auc_score(y_test_ticker, ebm_dist_pred_proba),
+            'roc_auc_ci': (ebm_auc_lo, ebm_auc_hi),
             'f1': f1_score(y_test_ticker, ebm_dist_pred, zero_division=0),
             'brier_score': brier_score_loss(y_test_ticker, ebm_dist_pred_proba),
             'predictions': ebm_dist_pred,
@@ -396,9 +448,17 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None):
         'y_true': y_test_ticker,
         'test_data': test_clean[ticker_mask]
     }
-    
-    logger.info(f"{ticker} - LightGBM: Acc={results[ticker]['lightgbm']['accuracy']:.3f}, AUC={results[ticker]['lightgbm']['roc_auc']:.3f}")
-    logger.info(f"{ticker} - EBM Distilled: Acc={results[ticker]['ebm_distilled']['accuracy']:.3f}, AUC={results[ticker]['ebm_distilled']['roc_auc']:.3f}")
+
+    logger.info(
+        f"{ticker} - LightGBM: Acc={results[ticker]['lightgbm']['accuracy']:.3f}, "
+        f"AUC={results[ticker]['lightgbm']['roc_auc']:.3f} "
+        f"[{lgbm_auc_lo:.3f}, {lgbm_auc_hi:.3f}]"
+    )
+    logger.info(
+        f"{ticker} - EBM Distilled: Acc={results[ticker]['ebm_distilled']['accuracy']:.3f}, "
+        f"AUC={results[ticker]['ebm_distilled']['roc_auc']:.3f} "
+        f"[{ebm_auc_lo:.3f}, {ebm_auc_hi:.3f}]"
+    )
     
     return results
 
@@ -449,10 +509,19 @@ def main():
     parser = argparse.ArgumentParser(description='Quarterly rolling OOS evaluation')
     parser.add_argument('--config', default='config/config.yaml',
                         help='Path to config YAML (default: config/config.yaml)')
+    parser.add_argument(
+        '--mode', default='standard', choices=['standard', 'thr'],
+        help=(
+            'standard (default): temperature-scaled EBM distillation; '
+            'thr: apply confidence threshold filter when training EBM '
+            '(loads best_threshold from walk_forward_distillation_results_thr.pkl)'
+        ),
+    )
     args = parser.parse_args()
 
     config_stem = Path(args.config).stem
     suffix = config_stem[len('config'):]
+    mode_suffix = '_thr' if args.mode == 'thr' else ''
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = f"logs/rolling_oos_quarterly_{timestamp}.log"
@@ -471,22 +540,42 @@ def main():
     logger.info("Q2 2020 onwards: quarterly retraining with 3-year rolling window")
     logger.info("Training exclusively on SPY with 10 stationary technical features")
     logger.info(f"Config: {args.config}  (output suffix: '{suffix}')")
+    logger.info(
+        "NOTE: the config suffix only affects the IS seed model used for Q1 2020. "
+        "From Q2 2020 onward, both configs retrain on the same 3-year rolling window "
+        "with random_state=42, so OOS metrics from Q2 2020+ are identical across configs. "
+        "Meaningful config differences exist only in the IS walk-forward results."
+    )
     logger.info("=" * 80)
 
     # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
 
-    # Load best temperature from distillation results (selected on IS period)
-    distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
+    # Load best temperature (and threshold if mode='thr') from distillation results
+    if args.mode == 'thr':
+        distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}_thr.pkl')
+    else:
+        distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
+
+    best_threshold = 0.50  # default: no filtering
     if distill_path.exists():
         with open(distill_path, 'rb') as f:
             distill_results = pickle.load(f)
         best_T = distill_results['best_T']
-        logger.info(f"Best temperature loaded from distillation results: T={best_T}")
+        if args.mode == 'thr':
+            best_threshold = distill_results.get('best_threshold', 0.55)
+            logger.info(
+                f"Loaded from {distill_path.name}: T={best_T}, threshold={best_threshold:.2f}"
+            )
+        else:
+            logger.info(f"Best temperature loaded from distillation results: T={best_T}")
     else:
-        best_T = 4
-        logger.warning(f"Distillation results not found — using default T={best_T}")
+        best_T = 1 if args.mode == 'thr' else 4
+        logger.warning(
+            f"Distillation results not found ({distill_path}) — "
+            f"using defaults T={best_T}, threshold={best_threshold}"
+        )
 
     # Load data
     logger.info("\nLoading data...")
@@ -509,11 +598,18 @@ def main():
     # Load IS walk-forward models for the first OOS fold.
     # The IS walk-forward (2008-2020) produces the initial models; Q1 2020 uses
     # them directly. From Q2 2020 onwards, models are retrained quarterly.
+    # For mode='thr': IS EBM is forced to None so Q1 2020 retrains with threshold
+    # filtering applied — keeps distillation consistent across all OOS folds.
     logger.info("\nLoading IS walk-forward models for first OOS fold (Q1 2020)...")
     is_models_per_iter = {
         1: load_is_last_fold_models(1, best_T, suffix),
         2: load_is_last_fold_models(2, best_T, suffix),
     }
+    if args.mode == 'thr':
+        for it in [1, 2]:
+            if is_models_per_iter[it] is not None:
+                is_models_per_iter[it]['ebm_distilled'] = None
+        logger.info("thr mode: IS EBM set to None — Q1 2020 will retrain with threshold filter")
 
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
@@ -526,8 +622,10 @@ def main():
         for fold_idx, fold_info in enumerate(folds):
             # Pass IS models only for the first fold (Q1 2020)
             is_models = is_models_iter if fold_idx == 0 else None
-            fold_results = train_fold(data, fold_info, config, iteration, best_T=best_T,
-                                      is_models=is_models)
+            fold_results = train_fold(
+                data, fold_info, config, iteration,
+                best_T=best_T, is_models=is_models, best_threshold=best_threshold,
+            )
             fold_results['fold_info'] = fold_info
             iteration_results.append(fold_results)
         
@@ -581,7 +679,7 @@ def main():
     output_dir = Path('data/processed/rolling_oos')
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    output_path = output_dir / f'rolling_oos_quarterly_results{suffix}.pkl'
+    output_path = output_dir / f'rolling_oos_quarterly_results{suffix}{mode_suffix}.pkl'
     with open(output_path, 'wb') as f:
         pickle.dump(all_results, f)
     

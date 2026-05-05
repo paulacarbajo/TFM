@@ -85,23 +85,28 @@ Output: `data/processed/walk_forward_results_regime.pkl`
 
 ### Step 4 — Knowledge Distillation
 
-Trains LightGBM (teacher) → EBM distilled (student, soft labels). Searches temperature T ∈ {1, 2, 3, 4}, selects best T by mean validation AUC.
+Trains LightGBM (teacher) → EBM distilled (student, soft labels). Two modes:
+
+- **`--mode temp`** (default): searches temperature T ∈ {1, 2, 3, 4}, selects best T by mean validation AUC. Checkpoints after each fold.
+- **`--mode thr`**: searches confidence threshold ∈ {0.50, 0.55, 0.60} — filters ambiguous training observations (prob near 0.5) before EBM fitting, selects by mean validation Brier Score.
 
 ```bash
-python run_walk_forward_distillation.py
+python run_walk_forward_distillation.py                   # temperature search (default)
+python run_walk_forward_distillation.py --mode thr        # threshold search
 ```
 
-Output: `data/processed/walk_forward_distillation_results.pkl`
+Output: `data/processed/walk_forward_distillation_results.pkl` (temp) / `…_thr.pkl` (thr)
 
 ### Step 5 — Rolling OOS Evaluation
 
-20 quarterly folds (2020-Q1 to 2024-Q4). Fold 1 uses IS models; subsequent folds retrain with 3-year rolling window. Evaluates Iter1, Iter2, and EBM distilled.
+20 quarterly folds (2020-Q1 to 2024-Q4). Fold 1 uses IS models; subsequent folds retrain with 3-year rolling window. Evaluates Iter1 (10 features), Iter2 (+ 4 regime), and EBM distilled. Reports per-fold bootstrap 95% CIs for AUC (n\_boot=500, stratified).
 
 ```bash
-python run_rolling_oos_evaluation.py
+python run_rolling_oos_evaluation.py                      # standard (temperature only)
+python run_rolling_oos_evaluation.py --mode thr           # apply confidence threshold filter
 ```
 
-Output: `data/processed/rolling_oos/rolling_oos_quarterly_results.pkl`
+Output: `data/processed/rolling_oos/rolling_oos_quarterly_results.pkl` / `…_thr.pkl`
 
 ### Step 6 — SHAP Analysis
 
@@ -146,29 +151,34 @@ Output: `data/processed/rulefit_regime_results.pkl`
 | IS folds | 9 (2008) / 7 (2010) |
 | OOS folds | 20 quarterly (2020-Q1 to 2024-Q4) |
 | GMM | 3 regimes ordered by volatility, fit on train only |
-| Distillation | Temperature T∈{1,2,3,4}, selected by mean val AUC |
+| Distillation | Temperature T∈{1,2,3,4}, selected by mean val AUC; optional confidence threshold ∈{0.50,0.55,0.60} |
+| Threshold search | Best threshold=0.50 (no filtering) — Brier range across thresholds <0.001, negligible effect |
+| Bootstrap AUC CI | 95% CI per OOS fold (n_boot=500, stratified); typical width ±0.13 |
 | Purging | Last 8 trading days removed from each train fold |
 
 ## Results Summary
 
 **Rolling OOS (2020-2024), 20 quarterly folds:**
 
-| Model | Mean AUC | Notable periods |
-|---|---|---|
-| LightGBM Baseline | ~0.488 | Best: 2022-Q2 (0.698), 2024-Q1 (0.714) |
-| LightGBM + Regime | ~0.491 | +0.003 vs baseline (marginal) |
-| EBM Distilled (T=1) | ~0.488 | No systematic advantage over LightGBM |
-| RuleFit Distillation | 0.497 | L/S Sharpe: -0.01 |
-| RuleFit Regime | 0.494 | L/S Sharpe: +0.15 |
+| Model | OOS AUC | OOS Accuracy | OOS L/S Sharpe |
+|---|---|---|---|
+| LightGBM Baseline (Iter1) | 0.470 | 0.488 | +0.27 |
+| LightGBM + Regime (Iter2) | 0.476 | 0.500 | +0.11 |
+| EBM Distilled (T=1, Iter1) | 0.473 | 0.487 | +0.18 |
+| EBM Distilled + Regime (Iter2) | 0.471 | 0.492 | −0.08 |
+| RuleFit Distillation | ~0.497 | — | ~−0.01 |
+| RuleFit Regime | ~0.494 | — | ~+0.15 |
+
+> Per-fold bootstrap 95% CI on AUC is ±0.13 — all model differences are within noise.
 
 **Key findings:**
-1. OOS AUC ~0.49 — typical for equity markets without strong macro signals
-2. Models fail in sustained bull rallies (2020-Q2 COVID recovery, 2024 AI rally)
-3. GMM regime features add marginal AUC (+0.003) but improve trading metrics (less short bias in bull markets)
-4. `regime_state` (discrete ordinal) has SHAP=0 — only continuous probabilities matter
-5. Top SHAP drivers of SHORT predictions: `atr_14` (volatility) and `rsi_14` (momentum)
-6. RuleFit trades interpretability for predictive power (AUC drops to ~0.495)
-7. config_2010 produces identical OOS results to config_2008 — last IS fold trains on same 2016-2019 window in both cases
+1. OOS AUC ~0.47–0.48 — typical for equity markets without strong macro signals; no model beats noise threshold
+2. Models fail in sustained bull rallies (2020-Q2 COVID recovery, 2024 AI rally) — short bias from balanced labels
+3. GMM regime features add marginal AUC (+0.006) but reduce trading performance in OOS (more short exposure in bull regimes)
+4. `regime_state` (discrete ordinal) has SHAP≈0 — only continuous probabilities (`regime_prob_*`) carry information; redundant by construction
+5. Top SHAP drivers of SHORT predictions: `atr_14` (volatility) and `rsi_14` (overbought momentum)
+6. Temperature scaling (T∈{1,2,3,4}) and confidence threshold filtering both have negligible effect (AUC/Brier range <0.001) — sample-weighting already captures the confidence signal
+7. `config_2010` produces identical OOS results to `config_2008` — last IS fold trains on the same 2016-2019 window regardless of start date
 
 ## Data Sources
 

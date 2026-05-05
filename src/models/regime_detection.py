@@ -185,7 +185,15 @@ class RegimeDetector:
         regime_state: np.ndarray,
         regime_proba: np.ndarray
     ) -> pd.DataFrame:
-        """Append regime_state and regime_prob_0/1/2 columns to X."""
+        """Append regime_state and regime_prob_0/1/2 columns to X.
+
+        Note on SHAP: regime_state (integer 0/1/2) will always show SHAP≈0 in
+        LightGBM because it is functionally redundant with regime_prob_0/1/2
+        (regime_state = argmax(probs)). LightGBM finds no additional split gain
+        from the discrete label when the continuous probabilities are available.
+        This is expected behaviour, not a bug. regime_state is kept for human
+        readability and downstream rule extraction in RuleFit.
+        """
         result = X.copy()
         result['regime_state'] = regime_state
         for i in range(self.n_regimes):
