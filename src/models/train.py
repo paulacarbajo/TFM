@@ -94,7 +94,7 @@ class ModelTrainer:
                 learning_rate=self.lgbm_config.get('learning_rate', 0.05),
                 max_depth=self.lgbm_config.get('max_depth', 6),
                 num_leaves=self.lgbm_config.get('num_leaves', 20),
-                min_child_samples=self.lgbm_config.get('min_child_samples', 20),
+                min_child_samples=self.lgbm_config.get('min_child_samples', 50),
                 subsample=self.lgbm_config.get('subsample', 0.8),
                 colsample_bytree=self.lgbm_config.get('colsample_bytree', 0.8),
                 reg_alpha=self.lgbm_config.get('reg_alpha', 0.1),
@@ -222,19 +222,9 @@ class ModelTrainer:
                 if sample_weight is not None:
                     sample_weight = sample_weight[idx]
 
-            # sample_weight is not supported by imodels RuleFitClassifier.
-            # The distillation confidence signal is carried implicitly in y_train:
-            # high-confidence soft labels produce y_hard values far from 0.5 and
-            # thus dominate the Lasso objective in the rules layer.  A proper
-            # alternative would be oversampling high-weight rows before fitting
-            # (e.g. np.repeat rows proportional to sample_weight), but this was
-            # not implemented because the dataset is already small (~800 rows) and
-            # oversampling would introduce duplicate rows that distort rule support.
             if sample_weight is not None:
-                logger.info(
-                    "  RuleFit: sample_weight provided but not supported "
-                    "by imodels — ignored (confidence signal carried via y_train)"
-                )
+                # sample_weight not supported by imodels — confidence signal carried via y_train soft labels
+                logger.info("  RuleFit: sample_weight ignored (not supported by imodels)")
 
             model.fit(X_arr, y_train, feature_names=simple_names)
 

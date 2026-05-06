@@ -29,8 +29,8 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 │   └── shap_short_drivers_regime.png
 ├── main.py                          # Step 1: data ingestion + feature engineering
 ├── run_walk_forward.py              # Step 2: IS walk-forward (Iteration 1 baseline)
-├── run_walk_forward_regime.py       # Step 3: IS walk-forward + GMM regime (Iteration 2)
-├── run_walk_forward_distillation.py # Step 4: knowledge distillation (LGBM → EBM, T search)
+├── run_walk_forward_distillation.py # Step 3: knowledge distillation (LGBM → EBM, T search)
+├── run_walk_forward_regime.py       # Step 4: IS walk-forward + GMM regime (Iteration 2)
 ├── run_rolling_oos_evaluation.py    # Step 5: rolling quarterly OOS (2020-2024)
 ├── run_shap_analysis.py             # Step 6: SHAP feature importance (Iter1 + Iter2)
 ├── run_rulefit_distillation.py      # Step 7: RuleFit from EBM distilled (Iter1 rules)
@@ -40,6 +40,19 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 ```
 
 ## Pipeline — How to Reproduce
+
+**Quick reference — run in this order:**
+
+1. `python main.py` — download data, compute features, apply Triple Barrier labeling
+2. `python run_walk_forward.py` — IS walk-forward CV, trains LightGBM (Iteration 1)
+3. `python run_walk_forward_distillation.py` — knowledge distillation: LightGBM → EBM (soft labels, temperature search)
+4. `python run_walk_forward_regime.py` — IS walk-forward with GMM regime features (Iteration 2)
+5. `python run_rolling_oos_evaluation.py` — rolling quarterly OOS evaluation 2020–2024
+6. `python run_shap_analysis.py` — SHAP feature importance for Iter1 and Iter2
+7. `python run_rulefit_distillation.py` — RuleFit rules from EBM distilled (Iter1)
+8. `python run_rulefit_regime.py` — RuleFit rules from regime LightGBM (Iter2)
+
+> Steps 3 and 4 are independent and can run in parallel; both must complete before step 5.
 
 All scripts accept `--config` to switch between configurations:
 
@@ -73,17 +86,7 @@ python run_walk_forward.py
 
 Output: `data/processed/walk_forward_results.pkl`
 
-### Step 3 — Iteration 2: Walk-Forward with Regime Detection
-
-Adds 4 GMM regime features per fold (`regime_state`, `regime_prob_0/1/2`). GMM is fit exclusively on training data to avoid look-ahead bias.
-
-```bash
-python run_walk_forward_regime.py
-```
-
-Output: `data/processed/walk_forward_results_regime.pkl`
-
-### Step 4 — Knowledge Distillation
+### Step 3 — Knowledge Distillation
 
 Trains LightGBM (teacher) → EBM distilled (student, soft labels). Two modes:
 
@@ -96,6 +99,16 @@ python run_walk_forward_distillation.py --mode thr        # threshold search
 ```
 
 Output: `data/processed/walk_forward_distillation_results.pkl` (temp) / `…_thr.pkl` (thr)
+
+### Step 4 — Iteration 2: Walk-Forward with Regime Detection
+
+Adds 4 GMM regime features per fold (`regime_state`, `regime_prob_0/1/2`). GMM is fit exclusively on training data to avoid look-ahead bias.
+
+```bash
+python run_walk_forward_regime.py
+```
+
+Output: `data/processed/walk_forward_results_regime.pkl`
 
 ### Step 5 — Rolling OOS Evaluation
 
