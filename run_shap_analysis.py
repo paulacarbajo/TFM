@@ -125,19 +125,18 @@ if isinstance(shap_values, list):
 print(f"[OK] SHAP values computed: {shap_values.shape}")
 
 # ============================================================================
-# 6. SUMMARY PLOT - TOP 15 FEATURES
+# 6. SUMMARY PLOT - ALL FEATURES
 # ============================================================================
 print("\n[6] Creating SHAP summary plot...")
 
 plt.figure(figsize=(12, 8))
 shap.summary_plot(
-    shap_values, 
-    X_spy, 
+    shap_values,
+    X_spy,
     feature_names=feature_names,
-    max_display=15,
     show=False
 )
-plt.title('SHAP Summary: Top 15 Features (SPY, OOS 2020-2024)', fontsize=14, pad=20)
+plt.title('SHAP Feature Importance — Iteration 1 (LightGBM, last IS fold)', fontsize=14, pad=20)
 plt.tight_layout()
 plt.savefig('notes/shap_summary.png', dpi=300, bbox_inches='tight')
 plt.close()
@@ -343,19 +342,18 @@ if isinstance(shap_values_regime, list):
 print(f"[OK] SHAP values computed: {shap_values_regime.shape}")
 
 # ============================================================================
-# 15. SUMMARY PLOT - TOP 15 FEATURES (REGIME)
+# 15. SUMMARY PLOT - ALL FEATURES (REGIME)
 # ============================================================================
 print("\n[15] Creating SHAP summary plot for regime model...")
 
 plt.figure(figsize=(12, 8))
 shap.summary_plot(
-    shap_values_regime, 
-    X_spy_regime, 
+    shap_values_regime,
+    X_spy_regime,
     feature_names=feature_names_regime,
-    max_display=15,
     show=False
 )
-plt.title('SHAP Summary: Top 15 Features with Regime (SPY, OOS 2020-2024)', fontsize=14, pad=20)
+plt.title('SHAP Feature Importance — Iteration 2 (with Regime Features)', fontsize=14, pad=20)
 plt.tight_layout()
 plt.savefig('notes/shap_summary_regime.png', dpi=300, bbox_inches='tight')
 plt.close()
