@@ -5,15 +5,17 @@ Walk-Forward Cross-Validation Module
 Implements rolling-window walk-forward CV for financial time series,
 enforcing strict no-look-ahead bias throughout.
 
-Rolling window schema (3-year train / 1-year val, config_2010.yaml)
+Rolling window schema (3-year train / 1-year val, train_start=2008)
 ---------------------------------------------------------------------
-    Fold 1: train 2010–2013, val 2013–2014
-    Fold 2: train 2011–2014, val 2014–2015
-    Fold 3: train 2012–2015, val 2015–2016
-    Fold 4: train 2013–2016, val 2016–2017
-    Fold 5: train 2014–2017, val 2017–2018
-    Fold 6: train 2015–2018, val 2018–2019
-    Fold 7: train 2016–2019, val 2019–2020
+    Fold 1: train 2008–2011, val 2011–2012
+    Fold 2: train 2009–2012, val 2012–2013
+    Fold 3: train 2010–2013, val 2013–2014
+    Fold 4: train 2011–2014, val 2014–2015
+    Fold 5: train 2012–2015, val 2015–2016
+    Fold 6: train 2013–2016, val 2016–2017
+    Fold 7: train 2014–2017, val 2017–2018
+    Fold 8: train 2015–2018, val 2018–2019
+    Fold 9: train 2016–2019, val 2019–2020
     OOS:    2020–2024  (never seen during training)
 
 No-look-ahead guarantees

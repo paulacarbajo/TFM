@@ -7,8 +7,7 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 ```
 .
 ├── config/
-│   ├── config.yaml              # Baseline config (train_start=2008, 9 IS folds)
-│   └── config_2010.yaml         # Sensitivity config (train_start=2010, 7 IS folds)
+│   └── config.yaml              # Baseline config (train_start=2008, 9 IS folds)
 ├── src/
 │   ├── features/
 │   │   ├── feature_engineering.py   # 10 stationary technical indicators
@@ -54,17 +53,9 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 
 > Steps 3 and 4 are independent and can run in parallel; both must complete before step 5.
 
-All scripts accept `--config` to switch between configurations:
-
-```bash
-# Baseline (2008)
-python run_walk_forward.py --config config/config.yaml
-
-# Sensitivity (2010, skips Lehman crisis folds)
-python run_walk_forward.py --config config/config_2010.yaml
-```
-
-Output PKLs get a suffix matching the config stem (e.g. `_2010`).
+All scripts use `config/config.yaml` by default (train_start=2008, 9 IS folds).
+A different config can be passed with `--config path/to/config.yaml`; output PKLs
+will get a suffix matching the config stem (e.g. `_custom` for `config_custom.yaml`).
 
 ### Step 1 — Data Ingestion and Feature Engineering
 
@@ -191,7 +182,7 @@ Output: `data/processed/rulefit_regime_results.pkl`
 4. `regime_state` (discrete ordinal) has SHAP≈0 — only continuous probabilities (`regime_prob_*`) carry information; redundant by construction
 5. Top SHAP drivers of SHORT predictions: `atr_14` (volatility) and `rsi_14` (overbought momentum)
 6. Temperature scaling (T∈{1,2,3,4}) and confidence threshold filtering both have negligible effect (AUC/Brier range <0.001) — sample-weighting already captures the confidence signal
-7. `config_2010` produces identical OOS results to `config_2008` — last IS fold trains on the same 2016-2019 window regardless of start date
+7. Sensitivity analysis (train_start=2010) produces identical OOS results — last IS fold trains on the same 2016-2019 window regardless of start date; the 2010 config was removed from the repo
 
 ## Data Sources
 

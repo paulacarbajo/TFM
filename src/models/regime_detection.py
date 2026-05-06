@@ -1,12 +1,16 @@
 """
-Regime Detection — 3-component GMM on (ret_1d, vol_20d, vix).
+Regime Detection — n-component GMM on (ret_1d, vol_20d, vix).
 
 Called inside the walk-forward loop by run_walk_forward_regime.py and
 run_walk_forward_distillation.py. At each fold:
     1. Fits GMM + StandardScaler on training data only.
     2. Assigns regime labels/probabilities to train and val via transform/predict.
-    3. Appends four columns: regime_state (0=Bull, 1=Neutral, 2=Bear/Crisis),
-       regime_prob_0, regime_prob_1, regime_prob_2.
+    3. Appends 1 + n_components columns: regime_state (volatility-ordered integer)
+       and regime_prob_0 … regime_prob_{n-1}.
+
+n_components is read from config['models']['regime']['n_components'] (default 3).
+  n_components=3: 0=Bull, 1=Neutral, 2=Bear/Crisis
+  n_components=2: 0=Bull, 1=Bear  (no Neutral)
 
 GMM inputs use vol_20d (absolute volatility level) for regime clustering —
 vol_rel is appropriate as a model feature but not here, since two periods
@@ -25,14 +29,21 @@ from sklearn.preprocessing import StandardScaler
 
 class RegimeDetector:
     """
-    3-component GMM regime detector. Fitted on training data only; applied
+    n-component GMM regime detector. Fitted on training data only; applied
     to validation via transform/predict (no look-ahead).
-    Regimes are volatility-ordered: 0=Bull, 1=Neutral, 2=Bear/Crisis.
+    Regimes are volatility-ordered: 0=low-vol (Bull), …, n-1=high-vol (Bear/Crisis).
+    n_components is read from config['models']['regime']['n_components']; the
+    n_regimes constructor parameter is a fallback when the config key is absent.
     """
 
     def __init__(self, config: Dict[str, Any], n_regimes: int = 3):
         self.config = config
-        self.n_regimes = n_regimes
+        # Config takes priority; constructor parameter is the final fallback.
+        self.n_regimes = (
+            config.get('models', {})
+                  .get('regime', {})
+                  .get('n_components', n_regimes)
+        )
 
         self.model        = None
         self.scaler       = None
@@ -44,7 +55,7 @@ class RegimeDetector:
 
         logger.info(
             f"RegimeDetector initialised  |  "
-            f"GMM n_components={n_regimes}  |  "
+            f"GMM n_components={self.n_regimes}  |  "
             f"inputs: {self.regime_features}"
         )
 
@@ -185,10 +196,10 @@ class RegimeDetector:
         regime_state: np.ndarray,
         regime_proba: np.ndarray
     ) -> pd.DataFrame:
-        """Append regime_state and regime_prob_0/1/2 columns to X.
+        """Append regime_state and regime_prob_0 … regime_prob_{n-1} columns to X.
 
-        Note on SHAP: regime_state (integer 0/1/2) will always show SHAP≈0 in
-        LightGBM because it is functionally redundant with regime_prob_0/1/2
+        Note on SHAP: regime_state (integer ordinal) will always show SHAP≈0 in
+        LightGBM because it is functionally redundant with regime_prob_* columns
         (regime_state = argmax(probs)). LightGBM finds no additional split gain
         from the discrete label when the continuous probabilities are available.
         This is expected behaviour, not a bug. regime_state is kept for human

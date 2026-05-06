@@ -174,3 +174,9 @@ models:
     tree_size: 4
     max_rules: 500
     random_state: 42
+
+  # GMM regime detection configuration (Iteration 2)
+  # n_components=2: Bull / Bear  (2 regime features: regime_prob_0, regime_prob_1)
+  # n_components=3: Bull / Neutral / Bear  (3 regime features: regime_prob_0/1/2)
+  regime:
+    n_components: 2

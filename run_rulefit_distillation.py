@@ -17,7 +17,6 @@ Evaluation: full OOS period 2020-2024.
 
 Usage:
     python run_rulefit_distillation.py
-    python run_rulefit_distillation.py --config config/config_2010.yaml
 """
 
 import argparse

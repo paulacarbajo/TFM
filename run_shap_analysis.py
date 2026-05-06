@@ -44,12 +44,9 @@ print("="*80)
 # 1. LOAD TRAINED MODELS
 # ============================================================================
 print("\n[1] Loading trained models from last fold (most recent training data)...")
-# NOTE: Both config.yaml (fold 9) and config_2010.yaml (fold 7) share the same
-# last-fold training window (2016-2019 → val 2019-2020) due to the rolling-window
-# design. The SHAP results produced here are therefore identical for both configs.
-# This is structurally expected, not a bug. To obtain config-specific SHAP values
-# you would need to aggregate over earlier folds (e.g. folds with 2013-2016 data)
-# that are unique to config.yaml but not present in config_2010.yaml.
+# NOTE: The last IS fold always trains on the 2016-2019 window (val 2019-2020)
+# regardless of train_start, because the rolling window slides to the same position.
+# SHAP is computed on the OOS period 2020-2024 using this last-fold model.
 
 with open(f'data/processed/walk_forward_results{suffix}.pkl', 'rb') as f:
     wf_results = pickle.load(f)
@@ -291,9 +288,9 @@ regime_labels, regime_probs = regime_detector.predict(df_oos)
 
 df_oos_regime = df_oos.copy()
 df_oos_regime['regime_state'] = regime_labels
-df_oos_regime['regime_prob_0'] = regime_probs[:, 0]
-df_oos_regime['regime_prob_1'] = regime_probs[:, 1]
-df_oos_regime['regime_prob_2'] = regime_probs[:, 2]
+n_regimes = regime_probs.shape[1]
+for i in range(n_regimes):
+    df_oos_regime[f'regime_prob_{i}'] = regime_probs[:, i]
 
 print(f"[OK] Added regime features to {len(df_oos_regime)} rows")
 
@@ -447,8 +444,8 @@ OUTPUTS:
 - notes/shap_short_drivers_regime.png: Features driving short predictions with regime
 
 REGIME FEATURE IMPORTANCE:
-Check the plots to see how regime_state, regime_prob_0, regime_prob_1, and
-regime_prob_2 rank among the 14 features in driving predictions.
+Check the plots to see how regime_state and regime_prob_* columns
+rank among the features in driving predictions.
 """)
 print("="*80)
 

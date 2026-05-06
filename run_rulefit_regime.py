@@ -23,7 +23,7 @@ Training data: IS last 2 folds (2015-2019).
 Evaluation: full OOS period 2020-2024.
 
 Usage:
-    python run_rulefit_regime.py --config config/config_2010.yaml
+    python run_rulefit_regime.py
 """
 
 import argparse
@@ -76,8 +76,8 @@ def calculate_trading_metrics(predictions: np.ndarray, returns: np.ndarray, stra
 
 def main():
     parser = argparse.ArgumentParser(description='RuleFit from regime-aware LightGBM soft labels')
-    parser.add_argument('--config', default='config/config_2010.yaml',
-                        help='Path to config YAML (default: config/config_2010.yaml)')
+    parser.add_argument('--config', default='config/config.yaml',
+                        help='Path to config YAML (default: config/config.yaml)')
     args = parser.parse_args()
 
     config_stem = Path(args.config).stem

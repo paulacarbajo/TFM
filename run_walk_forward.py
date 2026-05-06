@@ -23,7 +23,7 @@ def main():
                         help='Path to config YAML (default: config/config.yaml)')
     args = parser.parse_args()
 
-    # Derive output suffix from config stem: 'config' → '', 'config_2010' → '_2010'
+    # Derive output suffix from config stem: 'config' → '', 'config_foo' → '_foo'
     config_stem = Path(args.config).stem
     suffix = config_stem[len('config'):]
 

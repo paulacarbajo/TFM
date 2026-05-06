@@ -5,11 +5,9 @@ Extends the baseline walk-forward by adding GMM-based regime features
 to the training and validation sets at each fold. The GMM is fitted
 exclusively on training data to avoid look-ahead bias.
 
-Regime features added per fold:
-- regime_state: integer in {0, 1, 2} ordered by volatility
-- regime_prob_0: probability of low-volatility regime
-- regime_prob_1: probability of medium-volatility regime
-- regime_prob_2: probability of high-volatility regime
+Regime features added per fold (number depends on config regime.n_components):
+- regime_state: integer 0…n-1 ordered by volatility (0=Bull, n-1=Bear)
+- regime_prob_0 … regime_prob_{n-1}: GMM component probabilities
 
 Results are saved to data/processed/walk_forward_results_regime.pkl.
 """
@@ -25,12 +23,9 @@ from src.ingestion.loader import DataLoader
 from src.models import ModelTrainer, WalkForwardCV
 from src.models.regime_detection import RegimeDetector
 
-REGIME_COLS = [
-    'regime_state',
-    'regime_prob_0',
-    'regime_prob_1',
-    'regime_prob_2'
-]
+def _regime_cols(n_components: int):
+    """Return the regime feature column names for a given n_components."""
+    return ['regime_state'] + [f'regime_prob_{i}' for i in range(n_components)]
 
 
 def main():
@@ -99,19 +94,22 @@ def main():
         logger.info(f"Original features: {X_train.shape[1]}")
 
         # Step 1: Fit GMM on train, infer on both train and val
-        # Use full DataFrames that include vix for regime detection
+        # n_regimes is read from config['models']['regime']['n_components'] inside RegimeDetector
         logger.info("Detecting market regimes...")
-        regime_detector = RegimeDetector(config, n_regimes=3)
+        regime_detector = RegimeDetector(config)
+        logger.info(f"RegimeDetector: n_components={regime_detector.n_regimes}")
         train_data_with_regime, val_data_with_regime = regime_detector.fit_predict(
             train_data_full, val_data_full
         )
-        
+
+        regime_cols = _regime_cols(regime_detector.n_regimes)
+
         # Step 2: Extract regime features and add them to X_train and X_val
         # Align regime features with X_train and X_val indices
         X_train_r = X_train.copy()
         X_val_r = X_val.copy()
 
-        for feat in REGIME_COLS:
+        for feat in regime_cols:
             if feat in train_data_with_regime.columns:
                 X_train_r[feat] = train_data_with_regime.loc[X_train.index, feat]
             if feat in val_data_with_regime.columns:
@@ -128,7 +126,7 @@ def main():
         fold_data_regime['X_train'] = X_train_r
         fold_data_regime['X_val'] = X_val_r
         fold_data_regime['feature_names'] = (
-            fold_data['feature_names'] + REGIME_COLS
+            fold_data['feature_names'] + regime_cols
         )
 
         logger.info(
@@ -165,7 +163,8 @@ def main():
     logger.info("=" * 80)
     logger.info(f"Total folds: {len(all_fold_results)}")
     logger.info(f"Models trained: LightGBM")
-    logger.info(f"Regime features: {len(REGIME_COLS)} columns added per fold")
+    n_regime_comps = config.get('models', {}).get('regime', {}).get('n_components', 3)
+    logger.info(f"Regime features: {len(_regime_cols(n_regime_comps))} columns added per fold")
     logger.info(f"Results saved: {output_path}")
     logger.info(f"Next step: run_rolling_oos_evaluation.py (quarterly backtest, iteration 2)")
     logger.info("=" * 80)

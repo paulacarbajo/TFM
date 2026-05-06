@@ -134,9 +134,12 @@ def get_feature_columns(data_df, iteration):
     available_cols = data_df.columns.tolist()
     feature_cols = [col for col in TECHNICAL_FEATURES if col in available_cols]
     
-    # For iteration 2, add regime features
+    # For iteration 2, add regime features (dynamic: supports any n_components)
     if iteration == 2:
-        regime_features = ['regime_state', 'regime_prob_0', 'regime_prob_1', 'regime_prob_2']
+        regime_features = (
+            ['regime_state'] +
+            sorted([col for col in available_cols if col.startswith('regime_prob_')])
+        )
         for col in regime_features:
             if col in available_cols:
                 feature_cols.append(col)
@@ -207,7 +210,9 @@ def load_is_last_fold_models(iteration, best_T, suffix=''):
         is_models = {
             'lightgbm': last['models']['lightgbm'],
             'ebm_distilled': None,  # trained using IS LightGBM soft labels in first fold
-            'regime_detector': last.get('regime_detector'),
+            # regime_detector is intentionally NOT loaded from PKL — the serialized
+            # detector may have a stale n_regimes that differs from config.yaml.
+            # Q1 2020 will refit a fresh RegimeDetector from config on its training window.
             'feature_names': last['feature_names'],
             'fold_number': last['fold_number'],
         }
@@ -253,31 +258,32 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
     # Handle regime features for iteration 2
     if iteration == 2:
         if is_models is not None and is_models.get('regime_detector') is not None:
-            # First OOS fold: use IS regime detector — no refitting
+            # This branch is no longer reachable: load_is_last_fold_models() no longer
+            # stores the PKL detector (stale n_regimes risk). Kept as a safety fallback.
             logger.info("First OOS fold: using IS GMM regime detector (no refitting)...")
             regime_detector = is_models['regime_detector']
+            logger.info(f"RegimeDetector: n_components={regime_detector.n_regimes}")
         else:
-            logger.info("Detecting regimes on training data...")
+            logger.info("Fitting GMM regime detector on training data...")
             regime_detector = RegimeDetector(config)
+            logger.info(f"RegimeDetector: n_components={regime_detector.n_regimes}")
             # Fit GMM on training data
             regime_detector.fit(train_data)
         
         # Get regime labels and probabilities for training data
         train_regime_labels, train_regime_probs = regime_detector.predict(train_data)
         
-        # Add regime features to training data
+        # Add regime features to training data (loop covers any n_components)
         train_data['regime_state'] = train_regime_labels
-        train_data['regime_prob_0'] = train_regime_probs[:, 0]
-        train_data['regime_prob_1'] = train_regime_probs[:, 1]
-        train_data['regime_prob_2'] = train_regime_probs[:, 2]
-        
+        for i in range(train_regime_probs.shape[1]):
+            train_data[f'regime_prob_{i}'] = train_regime_probs[:, i]
+
         # Predict regimes for test data
         test_regime_labels, test_regime_probs = regime_detector.predict(test_data)
-        
+
         test_data['regime_state'] = test_regime_labels
-        test_data['regime_prob_0'] = test_regime_probs[:, 0]
-        test_data['regime_prob_1'] = test_regime_probs[:, 1]
-        test_data['regime_prob_2'] = test_regime_probs[:, 2]
+        for i in range(test_regime_probs.shape[1]):
+            test_data[f'regime_prob_{i}'] = test_regime_probs[:, i]
     
     # Get feature columns
     # For first OOS fold using IS models: use the exact feature set the IS model was trained on.
@@ -298,7 +304,9 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
     logger.info(f"Feature list: {feature_cols}")
 
     # ASSERTION: Verify feature count (skip for IS models — may use IC-selected subset)
-    expected_count = 10 if iteration == 1 else 14  # 10 technical, or 10 + 4 regime
+    _n_regime = config.get('models', {}).get('regime', {}).get('n_components', 3)
+    # 10 technical + 1 regime_state + n_components regime_prob columns
+    expected_count = 10 if iteration == 1 else (10 + 1 + _n_regime)
     if is_models is None and len(feature_cols) != expected_count:
         error_msg = f"Feature count mismatch! Expected {expected_count}, got {len(feature_cols)}"
         logger.error(error_msg)
@@ -308,7 +316,11 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
         if iteration == 1:
             expected_features = TECHNICAL_FEATURES
         else:
-            expected_features = TECHNICAL_FEATURES + ['regime_state', 'regime_prob_0', 'regime_prob_1', 'regime_prob_2']
+            expected_features = (
+                TECHNICAL_FEATURES +
+                ['regime_state'] +
+                [f'regime_prob_{i}' for i in range(_n_regime)]
+            )
 
         extra = set(feature_cols) - set(expected_features)
         missing = set(expected_features) - set(feature_cols)

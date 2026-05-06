@@ -267,14 +267,15 @@ def main():
         else:
             print("RESULT: ALL CHECKS PASSED — ready to run training scripts")
         print("=" * 70)
-        print("\nRecommended execution order (use --config config/config_2010.yaml):")
-        print("  1. python run_walk_forward.py             --config config/config_2010.yaml")
-        print("  2. python run_walk_forward_regime.py      --config config/config_2010.yaml")
-        print("  3. python run_walk_forward_distillation.py --config config/config_2010.yaml  (slow: ~1-2h)")
-        print("  4. python run_rulefit_distillation.py     --config config/config_2010.yaml")
-        print("  5. python run_rulefit_regime.py           --config config/config_2010.yaml")
-        print("  6. python run_rolling_oos_evaluation.py   --config config/config_2010.yaml  (slow: ~1-2h)")
-        print("  7. python run_shap_analysis.py            --config config/config_2010.yaml")
+        print("\nRecommended execution order:")
+        print("  1. python main.py")
+        print("  2. python run_walk_forward.py")
+        print("  3. python run_walk_forward_distillation.py  (slow: ~1-2h)")
+        print("  4. python run_walk_forward_regime.py")
+        print("  5. python run_rolling_oos_evaluation.py     (slow: ~1-2h)")
+        print("  6. python run_shap_analysis.py")
+        print("  7. python run_rulefit_distillation.py")
+        print("  8. python run_rulefit_regime.py")
         sys.exit(0)
 
 
