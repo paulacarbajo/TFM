@@ -46,9 +46,10 @@ class ModelTrainer:
         self.config = config
         models_config = config.get('models', {})
 
-        self.lgbm_config   = models_config.get('lightgbm', {})
-        self.ebm_config    = models_config.get('ebm', {})
-        self.rulefit_config = models_config.get('rulefit', {})
+        self.lgbm_config        = models_config.get('lightgbm', {})
+        self.ebm_config         = models_config.get('ebm', {})
+        self.ebm_primary_config = models_config.get('ebm_primary', self.ebm_config)
+        self.rulefit_config     = models_config.get('rulefit', {})
 
         logger.info("ModelTrainer initialised")
         logger.info(f"LightGBM config: {self.lgbm_config}")
@@ -155,6 +156,46 @@ class ModelTrainer:
 
         except Exception as e:
             logger.warning(f"  EBM fold {fold_number} failed: {e}")
+            return None
+
+    def _train_ebm_primary(
+        self,
+        X_train: pd.DataFrame,
+        y_train: np.ndarray,
+        fold_number: int
+    ) -> Optional[ExplainableBoostingClassifier]:
+        """
+        Train an EBM directly on hard binary labels {0,1} with a more regularized
+        config than EBM Distilled (which uses soft labels from LightGBM).
+
+        Hard labels are noisier than soft labels, so fewer boosting rounds,
+        fewer interaction terms, and coarser bins reduce overfitting:
+        max_rounds=1500, interactions=3, min_samples_leaf=20, max_bins=64.
+        """
+        try:
+            logger.info(f"  Training EBM Primary (fold {fold_number}, ~30-60s)...")
+            start = time.time()
+
+            model = ExplainableBoostingClassifier(
+                max_bins=self.ebm_primary_config.get('max_bins', 64),
+                max_interaction_bins=self.ebm_primary_config.get('max_interaction_bins', 16),
+                interactions=self.ebm_primary_config.get('interactions', 3),
+                learning_rate=self.ebm_primary_config.get('learning_rate', 0.01),
+                max_rounds=self.ebm_primary_config.get('max_rounds', 1500),
+                min_samples_leaf=self.ebm_primary_config.get('min_samples_leaf', 20),
+                random_state=self.ebm_primary_config.get('random_state', 42),
+            )
+
+            model.fit(X_train, y_train)
+
+            logger.success(
+                f"  EBM Primary fold {fold_number} trained  |  "
+                f"{time.time() - start:.2f}s"
+            )
+            return model
+
+        except Exception as e:
+            logger.warning(f"  EBM Primary fold {fold_number} failed: {e}")
             return None
 
     def _train_rulefit(
@@ -326,9 +367,9 @@ class ModelTrainer:
         training_times['lightgbm'] = time.time() - start
         models['lightgbm'] = lgbm_model
 
-        # --- Tier 2: EBM Primary (hard labels) ---
+        # --- Tier 2: EBM Primary (hard labels, regularized config) ---
         start = time.time()
-        ebm_primary_model = self._train_ebm(X_train_clean, y_train_binary, fold_number)
+        ebm_primary_model = self._train_ebm_primary(X_train_clean, y_train_binary, fold_number)
         training_times['ebm_primary'] = time.time() - start
         models['ebm_primary'] = ebm_primary_model
 
@@ -356,7 +397,7 @@ class ModelTrainer:
         )
         logger.info(
             f"  EBM Primary: {'OK' if ebm_primary_model else 'FAILED'}  "
-            f"({training_times['ebm_primary']:.2f}s)"
+            f"({training_times['ebm_primary']:.2f}s)  [regularized: max_rounds=1500, interactions=3]"
         )
         logger.info("  EBM Distilled: SKIPPED → run_walk_forward_distillation.py")
         logger.info("  RuleFit:       SKIPPED → run_rulefit_distillation.py")

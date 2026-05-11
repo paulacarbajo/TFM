@@ -165,6 +165,19 @@ models:
     min_samples_leaf: 10
     random_state: 42
 
+  # EBM Primary configuration (trained on hard labels — more regularized than EBM Distilled)
+  # Hard labels {0,1} are noisier than soft labels; fewer rounds and interactions
+  # prevent overfitting on noisy binary targets.
+  # max_rounds reduced 3000→1500, interactions 5→3, min_samples_leaf 10→20, max_bins 128→64.
+  ebm_primary:
+    max_bins: 64
+    max_interaction_bins: 16
+    interactions: 3
+    learning_rate: 0.01
+    max_rounds: 1500
+    min_samples_leaf: 20
+    random_state: 42
+
   # RuleFit configuration
   # Excluded from walk-forward validation due to scalability constraints.
   # Applied separately on a representative training sample for post-hoc
