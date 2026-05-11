@@ -177,10 +177,13 @@ def load_is_last_fold_models(iteration, best_T, suffix=''):
         last = wf['all_fold_results'][-1]
         is_models = {
             'lightgbm': last['models']['lightgbm'],
+            'ebm_primary': last['models'].get('ebm_primary'),
             'ebm_distilled': None,
             'feature_names': last['feature_names'],
             'fold_number': last['fold_number'],
         }
+        if is_models['ebm_primary'] is not None:
+            logger.info(f"IS EBM primary loaded from fold {last['fold_number']}")
 
         if distill_path.exists():
             with open(distill_path, 'rb') as f:
@@ -209,6 +212,7 @@ def load_is_last_fold_models(iteration, best_T, suffix=''):
         last = wf['all_fold_results'][-1]
         is_models = {
             'lightgbm': last['models']['lightgbm'],
+            'ebm_primary': last['models'].get('ebm_primary'),
             'ebm_distilled': None,  # trained using IS LightGBM soft labels in first fold
             # regime_detector is intentionally NOT loaded from PKL — the serialized
             # detector may have a stale n_regimes that differs from config.yaml.
@@ -216,6 +220,8 @@ def load_is_last_fold_models(iteration, best_T, suffix=''):
             'feature_names': last['feature_names'],
             'fold_number': last['fold_number'],
         }
+        if is_models['ebm_primary'] is not None:
+            logger.info(f"IS EBM primary loaded from fold {last['fold_number']}")
 
         logger.info(f"IS Iter 2 models loaded from fold {last['fold_number']} "
                     f"(features: {is_models['feature_names']})")
@@ -362,12 +368,15 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
     if is_models is not None:
         # First OOS fold: carry IS walk-forward models forward — no retraining.
         logger.info(f"First OOS fold: using IS models from fold {is_models['fold_number']} "
-                    f"(LightGBM) — no retraining")
+                    f"(LightGBM + EBM primary) — no retraining")
         lgbm_model = is_models['lightgbm']
+        ebm_primary_model = is_models.get('ebm_primary')
     else:
         # Subsequent OOS folds: retrain on the 3-year rolling window
         logger.info("Training LightGBM...")
         lgbm_model = trainer._train_lightgbm(X_train, y_train_binary, fold_info['fold_id'])
+        logger.info("Training EBM primary (hard labels)...")
+        ebm_primary_model = trainer._train_ebm(X_train, y_train_binary, fold_info['fold_id'])
 
     # EBM distilled (knowledge distillation from LightGBM)
     if is_models is not None and is_models.get('ebm_distilled') is not None:
@@ -434,9 +443,13 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
 
     ebm_dist_pred_proba = ebm_dist_model.predict_proba(X_test_ticker)[:, 1]
     ebm_dist_pred = (ebm_dist_pred_proba >= 0.5).astype(int)
-    
-    lgbm_auc_lo, lgbm_auc_hi = bootstrap_auc_ci(y_test_ticker, lgbm_pred_proba)
-    ebm_auc_lo,  ebm_auc_hi  = bootstrap_auc_ci(y_test_ticker, ebm_dist_pred_proba)
+
+    ebm_primary_pred_proba = ebm_primary_model.predict_proba(X_test_ticker)[:, 1] if ebm_primary_model is not None else np.full(len(X_test_ticker), 0.5)
+    ebm_primary_pred = (ebm_primary_pred_proba >= 0.5).astype(int)
+
+    lgbm_auc_lo,        lgbm_auc_hi        = bootstrap_auc_ci(y_test_ticker, lgbm_pred_proba)
+    ebm_auc_lo,         ebm_auc_hi         = bootstrap_auc_ci(y_test_ticker, ebm_dist_pred_proba)
+    ebm_primary_auc_lo, ebm_primary_auc_hi = bootstrap_auc_ci(y_test_ticker, ebm_primary_pred_proba)
 
     results[ticker] = {
         'lightgbm': {
@@ -447,6 +460,15 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
             'brier_score': brier_score_loss(y_test_ticker, lgbm_pred_proba),
             'predictions': lgbm_pred,
             'pred_proba': lgbm_pred_proba
+        },
+        'ebm_primary': {
+            'accuracy': accuracy_score(y_test_ticker, ebm_primary_pred),
+            'roc_auc': roc_auc_score(y_test_ticker, ebm_primary_pred_proba),
+            'roc_auc_ci': (ebm_primary_auc_lo, ebm_primary_auc_hi),
+            'f1': f1_score(y_test_ticker, ebm_primary_pred, zero_division=0),
+            'brier_score': brier_score_loss(y_test_ticker, ebm_primary_pred_proba),
+            'predictions': ebm_primary_pred,
+            'pred_proba': ebm_primary_pred_proba
         },
         'ebm_distilled': {
             'accuracy': accuracy_score(y_test_ticker, ebm_dist_pred),
@@ -462,9 +484,14 @@ def train_fold(data, fold_info, config, iteration, best_T=4, is_models=None, bes
     }
 
     logger.info(
-        f"{ticker} - LightGBM: Acc={results[ticker]['lightgbm']['accuracy']:.3f}, "
+        f"{ticker} - LightGBM:    Acc={results[ticker]['lightgbm']['accuracy']:.3f}, "
         f"AUC={results[ticker]['lightgbm']['roc_auc']:.3f} "
         f"[{lgbm_auc_lo:.3f}, {lgbm_auc_hi:.3f}]"
+    )
+    logger.info(
+        f"{ticker} - EBM Primary: Acc={results[ticker]['ebm_primary']['accuracy']:.3f}, "
+        f"AUC={results[ticker]['ebm_primary']['roc_auc']:.3f} "
+        f"[{ebm_primary_auc_lo:.3f}, {ebm_primary_auc_hi:.3f}]"
     )
     logger.info(
         f"{ticker} - EBM Distilled: Acc={results[ticker]['ebm_distilled']['accuracy']:.3f}, "
@@ -643,11 +670,11 @@ def main():
         
         # Aggregate results across all folds (SPY only)
         aggregated = {
-            'SPY': {'lightgbm': {}, 'ebm_distilled': {}}
+            'SPY': {'lightgbm': {}, 'ebm_primary': {}, 'ebm_distilled': {}}
         }
-        
+
         ticker = 'SPY'
-        for model in ['lightgbm', 'ebm_distilled']:
+        for model in ['lightgbm', 'ebm_primary', 'ebm_distilled']:
             # Collect all predictions and true labels
             all_preds = []
             all_proba = []
@@ -714,9 +741,9 @@ def main():
 
         ticker = 'SPY'
         print(f"\n{ticker}:")
-        for model in ['lightgbm', 'ebm_distilled']:
+        for model in ['lightgbm', 'ebm_primary', 'ebm_distilled']:
             metrics = agg[ticker][model]
-            model_name = 'EBM DISTILLED' if model == 'ebm_distilled' else 'LIGHTGBM'
+            model_name = {'lightgbm': 'LIGHTGBM', 'ebm_primary': 'EBM PRIMARY', 'ebm_distilled': 'EBM DISTILLED'}[model]
             ls = metrics['trading_longshort']
             lo = metrics['trading_longonly']
             print(f"  {model_name}:")

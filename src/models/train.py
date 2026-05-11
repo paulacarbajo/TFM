@@ -326,11 +326,17 @@ class ModelTrainer:
         training_times['lightgbm'] = time.time() - start
         models['lightgbm'] = lgbm_model
 
-        # --- Tier 2: EBM Distilled — trained separately ---
+        # --- Tier 2: EBM Primary (hard labels) ---
+        start = time.time()
+        ebm_primary_model = self._train_ebm(X_train_clean, y_train_binary, fold_number)
+        training_times['ebm_primary'] = time.time() - start
+        models['ebm_primary'] = ebm_primary_model
+
+        # --- Tier 3: EBM Distilled — trained separately via distillation scripts ---
         models['ebm'] = None
         training_times['ebm'] = 0.0
 
-        # --- Tier 3: RuleFit — trained separately ---
+        # --- Tier 4: RuleFit — trained separately ---
         models['rulefit'] = None
         training_times['rulefit'] = 0.0
 
@@ -345,11 +351,15 @@ class ModelTrainer:
         logger.info("")
         logger.info("Fold training summary:")
         logger.info(
-            f"  LightGBM: {'OK' if lgbm_model else 'FAILED'}  "
+            f"  LightGBM:    {'OK' if lgbm_model else 'FAILED'}  "
             f"({training_times['lightgbm']:.2f}s)"
         )
-        logger.info("  EBM:      SKIPPED → run_walk_forward_distillation.py")
-        logger.info("  RuleFit:  SKIPPED → run_rulefit_distillation.py")
+        logger.info(
+            f"  EBM Primary: {'OK' if ebm_primary_model else 'FAILED'}  "
+            f"({training_times['ebm_primary']:.2f}s)"
+        )
+        logger.info("  EBM Distilled: SKIPPED → run_walk_forward_distillation.py")
+        logger.info("  RuleFit:       SKIPPED → run_rulefit_distillation.py")
         logger.info(f"  SHAP:     {'OK' if shap_values is not None else 'FAILED'}")
 
         return {
