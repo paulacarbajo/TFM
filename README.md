@@ -27,15 +27,16 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 │   ├── shap_short_drivers.png
 │   ├── shap_summary_regime.png
 │   └── shap_short_drivers_regime.png
+├── scripts/
+│   ├── main.py                          # Step 1: data ingestion + feature engineering
+│   ├── run_walk_forward.py              # Step 2: IS walk-forward (Iteration 1 baseline)
+│   ├── run_walk_forward_distillation.py # Step 3: knowledge distillation (LGBM → EBM, T search)
+│   ├── run_walk_forward_regime.py       # Step 4: IS walk-forward + GMM regime (Iteration 2)
+│   ├── run_rolling_oos_evaluation.py    # Step 5: rolling quarterly OOS (2020-2024)
+│   ├── run_shap_analysis.py             # Step 6: SHAP feature importance (Iter1 + Iter2)
+│   ├── run_rulefit_distillation.py      # Step 7: RuleFit from EBM distilled (Iter1 rules)
+│   └── run_rulefit_regime.py            # Step 8: RuleFit from regime LightGBM (Iter2 rules)
 ├── TFM_Notebook.ipynb               # Results notebook: IS/OOS tables, equity curves, SHAP
-├── main.py                          # Step 1: data ingestion + feature engineering
-├── run_walk_forward.py              # Step 2: IS walk-forward (Iteration 1 baseline)
-├── run_walk_forward_distillation.py # Step 3: knowledge distillation (LGBM → EBM, T search)
-├── run_walk_forward_regime.py       # Step 4: IS walk-forward + GMM regime (Iteration 2)
-├── run_rolling_oos_evaluation.py    # Step 5: rolling quarterly OOS (2020-2024)
-├── run_shap_analysis.py             # Step 6: SHAP feature importance (Iter1 + Iter2)
-├── run_rulefit_distillation.py      # Step 7: RuleFit from EBM distilled (Iter1 rules)
-├── run_rulefit_regime.py            # Step 8: RuleFit from regime LightGBM (Iter2 rules)
 ├── requirements.txt
 └── README.md
 ```
@@ -44,14 +45,14 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 
 **Quick reference — run in this order:**
 
-1. `python main.py` — download data, compute features, apply Triple Barrier labeling
-2. `python run_walk_forward.py` — IS walk-forward CV, trains LightGBM + EBM Primary (Iteration 1)
-3. `python run_walk_forward_distillation.py` — knowledge distillation: LightGBM → EBM (soft labels, temperature search)
-4. `python run_walk_forward_regime.py` — IS walk-forward with GMM regime features (Iteration 2)
-5. `python run_rolling_oos_evaluation.py` — rolling quarterly OOS evaluation 2020–2024
-6. `python run_shap_analysis.py` — SHAP feature importance for Iter1 and Iter2
-7. `python run_rulefit_distillation.py` — RuleFit rules from EBM distilled (Iter1)
-8. `python run_rulefit_regime.py` — RuleFit rules from regime LightGBM (Iter2)
+1. `python scripts/main.py` — download data, compute features, apply Triple Barrier labeling
+2. `python scripts/run_walk_forward.py` — IS walk-forward CV, trains LightGBM + EBM Primary (Iteration 1)
+3. `python scripts/run_walk_forward_distillation.py` — knowledge distillation: LightGBM → EBM (soft labels, temperature search)
+4. `python scripts/run_walk_forward_regime.py` — IS walk-forward with GMM regime features (Iteration 2)
+5. `python scripts/run_rolling_oos_evaluation.py` — rolling quarterly OOS evaluation 2020–2024
+6. `python scripts/run_shap_analysis.py` — SHAP feature importance for Iter1 and Iter2
+7. `python scripts/run_rulefit_distillation.py` — RuleFit rules from EBM distilled (Iter1)
+8. `python scripts/run_rulefit_regime.py` — RuleFit rules from regime LightGBM (Iter2)
 
 > Steps 3 and 4 are independent and can run in parallel; both must complete before step 5.
 
@@ -64,7 +65,7 @@ will get a suffix matching the config stem (e.g. `_custom` for `config_custom.ya
 Downloads SPY OHLCV (yfinance) and VIX (FRED), aligns on trading dates, computes 10 stationary technical features, applies Triple Barrier labeling.
 
 ```bash
-python main.py
+python scripts/main.py
 ```
 
 Output: `data/processed/assets.h5` (keys: `data_raw`, `engineered_features`)
@@ -74,7 +75,7 @@ Output: `data/processed/assets.h5` (keys: `data_raw`, `engineered_features`)
 Rolling walk-forward CV (3yr train / 1yr val) over IS period. Trains LightGBM + EBM Primary with IC-based feature selection (Spearman threshold=0.01). EBM Primary uses hard binary labels with a regularized config (max_rounds=1500, interactions=3) to reduce overfitting.
 
 ```bash
-python run_walk_forward.py
+python scripts/run_walk_forward.py
 ```
 
 Output: `data/processed/walk_forward_results.pkl`
@@ -87,8 +88,8 @@ Trains LightGBM (teacher) → EBM distilled (student, soft labels). Two modes:
 - **`--mode thr`**: searches confidence threshold ∈ {0.50, 0.55, 0.60} — filters ambiguous training observations (prob near 0.5) before EBM fitting, selects by mean validation Brier Score.
 
 ```bash
-python run_walk_forward_distillation.py                   # temperature search (default)
-python run_walk_forward_distillation.py --mode thr        # threshold search
+python scripts/run_walk_forward_distillation.py                   # temperature search (default)
+python scripts/run_walk_forward_distillation.py --mode thr        # threshold search
 ```
 
 Output: `data/processed/walk_forward_distillation_results.pkl` (temp) / `…_thr.pkl` (thr)
@@ -98,7 +99,7 @@ Output: `data/processed/walk_forward_distillation_results.pkl` (temp) / `…_thr
 Adds 3 GMM regime features per fold (`regime_state`, `regime_prob_0`, `regime_prob_1`). GMM is fit exclusively on training data to avoid look-ahead bias.
 
 ```bash
-python run_walk_forward_regime.py
+python scripts/run_walk_forward_regime.py
 ```
 
 Output: `data/processed/walk_forward_results_regime.pkl`
@@ -108,8 +109,8 @@ Output: `data/processed/walk_forward_results_regime.pkl`
 20 quarterly folds (2020-Q1 to 2024-Q4). Fold 1 uses IS models; subsequent folds retrain with 3-year rolling window. Evaluates Iter1 (up to 10 features), Iter2 (+ 3 regime features), EBM Primary, and EBM Distilled. Reports per-fold bootstrap 95% CIs for AUC (n\_boot=500, stratified).
 
 ```bash
-python run_rolling_oos_evaluation.py                      # standard (temperature only)
-python run_rolling_oos_evaluation.py --mode thr           # apply confidence threshold filter
+python scripts/run_rolling_oos_evaluation.py                      # standard (temperature only)
+python scripts/run_rolling_oos_evaluation.py --mode thr           # apply confidence threshold filter
 ```
 
 Output: `data/processed/rolling_oos/rolling_oos_quarterly_results.pkl` / `…_thr.pkl`
@@ -119,7 +120,7 @@ Output: `data/processed/rolling_oos/rolling_oos_quarterly_results.pkl` / `…_th
 SHAP TreeExplainer on the last IS fold's LightGBM for both iterations. Generates 4 plots in `notes/`.
 
 ```bash
-python run_shap_analysis.py
+python scripts/run_shap_analysis.py
 ```
 
 ### Step 7 — RuleFit Distillation (Interpretable Rules, Iteration 1)
@@ -127,7 +128,7 @@ python run_shap_analysis.py
 Extracts human-readable if-then trading rules from the EBM distilled model via RuleFit. Evaluates on OOS 2020-2024.
 
 ```bash
-python run_rulefit_distillation.py
+python scripts/run_rulefit_distillation.py
 ```
 
 Output: `data/processed/rulefit_distillation_results.pkl`
@@ -137,7 +138,7 @@ Output: `data/processed/rulefit_distillation_results.pkl`
 Full Iter2 distillation chain: LightGBM Regime → EBM Distilled → RuleFit with 13 features (10 technical + 3 regime, human-readable names).
 
 ```bash
-python run_rulefit_regime.py
+python scripts/run_rulefit_regime.py
 ```
 
 Output: `data/processed/rulefit_regime_results.pkl`
