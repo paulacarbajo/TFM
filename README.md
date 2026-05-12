@@ -1,6 +1,6 @@
 # Market Regime Detection and Knowledge Distillation for Financial Time Series
 
-Master's thesis implementing supervised ML for binary classification of SPY ETF daily returns. Uses Triple Barrier labeling, walk-forward cross-validation, GMM-based market regime detection, knowledge distillation (LightGBM → EBM → RuleFit), and SHAP interpretability.
+Master's thesis implementing supervised ML for binary classification of SPY ETF daily returns. Uses Triple Barrier labeling, walk-forward cross-validation, GMM-based market regime detection, knowledge distillation (LightGBM → EBM Primary → EBM Distilled → RuleFit), and SHAP interpretability.
 
 ## Repository Structure
 
@@ -45,7 +45,7 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 **Quick reference — run in this order:**
 
 1. `python main.py` — download data, compute features, apply Triple Barrier labeling
-2. `python run_walk_forward.py` — IS walk-forward CV, trains LightGBM (Iteration 1)
+2. `python run_walk_forward.py` — IS walk-forward CV, trains LightGBM + EBM Primary (Iteration 1)
 3. `python run_walk_forward_distillation.py` — knowledge distillation: LightGBM → EBM (soft labels, temperature search)
 4. `python run_walk_forward_regime.py` — IS walk-forward with GMM regime features (Iteration 2)
 5. `python run_rolling_oos_evaluation.py` — rolling quarterly OOS evaluation 2020–2024
@@ -134,7 +134,7 @@ Output: `data/processed/rulefit_distillation_results.pkl`
 
 ### Step 8 — RuleFit Regime (Interpretable Rules, Iteration 2)
 
-Full Iter2 distillation chain: LightGBM Regime → EBM Distilled → RuleFit with 13 features (10 technical + 4 regime, human-readable names).
+Full Iter2 distillation chain: LightGBM Regime → EBM Distilled → RuleFit with 13 features (10 technical + 3 regime, human-readable names).
 
 ```bash
 python run_rulefit_regime.py
@@ -148,10 +148,10 @@ Output: `data/processed/rulefit_regime_results.pkl`
 |---|---|
 | Asset | SPY ETF (S&P 500) |
 | Data range | 2004-2024 |
-| IS period | 2008-2020 (baseline) / 2010-2020 (sensitivity) |
+| IS period | 2008-2019 |
 | OOS period | 2020-2024 |
 | Triple Barrier | max_holding=8d, vol_multiplier=1.0, volatility=ewm(span=20).std() |
-| Label | Binary: 1=take profit, 0=stop loss or time barrier |
+| Label | Binary: +1=take profit, −1=stop loss or time barrier |
 | Features | Up to 10 stationary technical indicators (IC selection per fold) |
 | Walk-forward | Rolling 3yr train / 1yr val |
 | IS folds | 9 (2008) |
@@ -173,10 +173,10 @@ Output: `data/processed/rulefit_regime_results.pkl`
 | LightGBM + Regime (Iter2) | 0.499 | 0.497 | +0.39 |
 | EBM Primary (Iter1) | 0.496 | 0.501 | +0.18 |
 | EBM Primary + Regime (Iter2) | 0.499 | 0.539 | +0.63 |
-| EBM Distilled (T=1, Iter1) | 0.492 | 0.482 | −0.28 |
+| EBM Distilled (T=2, Iter1) | 0.492 | 0.482 | −0.28 |
 | EBM Distilled + Regime (Iter2) | 0.489 | 0.485 | −0.20 |
-| RuleFit Distillation | ~0.494 | — | ~−0.01 |
-| RuleFit Regime | ~0.494 | — | ~+0.15 |
+| RuleFit Distillation | ~0.494 | — | ~+0.33 |
+| RuleFit Regime | ~0.499 | — | ~−0.03 |
 
 > Per-fold bootstrap 95% CI on AUC is ±0.13 — all model differences are within noise.
 
@@ -186,7 +186,7 @@ Output: `data/processed/rulefit_regime_results.pkl`
 3. EBM Primary (interpretable GAM trained directly on hard labels) matches or exceeds LightGBM AUC in both iterations; highest L/S Sharpe in Iter2 (+0.63)
 4. GMM regime features add marginal AUC (+0.012 for LightGBM) but EBM Primary benefits more from regime context (Acc +4.2 pp, L/S Sharpe +0.45)
 5. `regime_state` (discrete ordinal) has SHAP≈0 — only continuous probabilities (`regime_prob_*`) carry information; redundant by construction
-6. Top SHAP drivers of SHORT predictions: `atr_14` (volatility) and `rsi_14` (overbought momentum)
+6. Top SHAP drivers of SHORT predictions: `vol_rel` (relative volatility) and `rsi_14` (overbought momentum)
 7. Temperature scaling (T∈{1,2,3,4}) and confidence threshold filtering both have negligible effect on EBM Distilled (AUC/Brier range <0.001)
 8. Sensitivity analysis (train_start=2010) produces identical OOS results — last IS fold trains on the same 2016-2019 window regardless of start date; the 2010 config was removed from the repo
 
