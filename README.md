@@ -168,16 +168,16 @@ Output: `data/processed/rulefit_regime_results.pkl`
 
 **Rolling OOS (2020-2024), 20 quarterly folds:**
 
-| Model | Mean OOS AUC | Mean OOS Accuracy | OOS L/S Sharpe |
-|---|---|---|---|
-| LightGBM Baseline (Iter1) | 0.487 | 0.496 | +0.39 |
-| LightGBM + Regime (Iter2) | 0.499 | 0.497 | +0.39 |
-| EBM Primary (Iter1) | 0.496 | 0.501 | +0.18 |
-| EBM Primary + Regime (Iter2) | 0.499 | 0.539 | +0.63 |
-| EBM Distilled (T=2, Iter1) | 0.492 | 0.482 | −0.28 |
-| EBM Distilled + Regime (Iter2) | 0.489 | 0.485 | −0.20 |
-| RuleFit Distillation | 0.521 | 0.542 | +0.56 |
-| RuleFit Regime | 0.501 | 0.528 | +0.17 |
+| Model | Mean OOS AUC | Mean OOS Accuracy | L/S Sharpe | L/O Sharpe | S/O Sharpe |
+|---|---|---|---|---|---|
+| LightGBM Baseline (Iter1) | 0.487 | 0.496 | +0.39 | +0.69 | −0.31 |
+| LightGBM + Regime (Iter2) | 0.499 | 0.497 | +0.39 | +0.70 | −0.30 |
+| EBM Primary (Iter1) | 0.496 | 0.501 | +0.18 | +0.51 | −0.67 |
+| EBM Primary + Regime (Iter2) | 0.499 | 0.539 | +0.63 | +0.75 | −0.15 |
+| EBM Distilled (T=2, Iter1) | 0.492 | 0.482 | −0.28 | +0.27 | −1.00 |
+| EBM Distilled + Regime (Iter2) | 0.489 | 0.485 | −0.20 | +0.32 | −0.93 |
+| RuleFit Distillation | 0.521 | 0.542 | +0.56 | +0.79 | −0.17 |
+| RuleFit Regime | 0.501 | 0.528 | +0.17 | +0.50 | −0.72 |
 
 > Per-fold bootstrap 95% CI on AUC is ±0.13 — all model differences are within noise.
 

@@ -59,6 +59,8 @@ def calculate_trading_metrics(predictions: np.ndarray, returns: np.ndarray, stra
 
     if strategy == 'long_only':
         signals = predictions.copy()
+    elif strategy == 'short_only':
+        signals = np.where(predictions == 0, -1, 0)
     else:
         signals = np.where(predictions == 1, 1, -1)
 
@@ -269,6 +271,7 @@ def main():
         'brier_score': brier_score_loss(y_oos, oos_pred_proba),
         'trading_longshort': calculate_trading_metrics(oos_pred, returns_oos, 'long_short'),
         'trading_longonly': calculate_trading_metrics(oos_pred, returns_oos, 'long_only'),
+        'trading_shortonly': calculate_trading_metrics(oos_pred, returns_oos, 'short_only'),
     }
 
     print(f"\n{'='*80}")
@@ -280,8 +283,10 @@ def main():
     print(f"  Brier Score:  {oos_metrics['brier_score']:.4f}")
     ls = oos_metrics['trading_longshort']
     lo = oos_metrics['trading_longonly']
+    so = oos_metrics['trading_shortonly']
     print(f"  [Long-Short]  Return: {ls['total_return']:>+7.1%}  Sharpe: {ls['sharpe']:.2f}  MaxDD: {ls['max_drawdown']:>+7.1%}")
     print(f"  [Long-Only]   Return: {lo['total_return']:>+7.1%}  Sharpe: {lo['sharpe']:.2f}  MaxDD: {lo['max_drawdown']:>+7.1%}")
+    print(f"  [Short-Only]  Return: {so['total_return']:>+7.1%}  Sharpe: {so['sharpe']:.2f}  MaxDD: {so['max_drawdown']:>+7.1%}")
     print("=" * 80)
 
     # ------------------------------------------------------------------

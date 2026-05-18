@@ -516,6 +516,9 @@ def calculate_trading_metrics(predictions, test_data, strategy='long_only'):
     if strategy == 'long_only':
         # Long when predict 1, cash when predict 0
         signals = predictions.copy()
+    elif strategy == 'short_only':
+        # Short when predict 0, cash when predict 1
+        signals = np.where(predictions == 0, -1, 0)
     else:  # long_short
         # Long when predict 1, short when predict 0
         signals = predictions.copy()
@@ -708,6 +711,9 @@ def main():
             aggregated[ticker][model]['trading_longonly'] = calculate_trading_metrics(
                 all_preds, all_test_data, strategy='long_only'
             )
+            aggregated[ticker][model]['trading_shortonly'] = calculate_trading_metrics(
+                all_preds, all_test_data, strategy='short_only'
+            )
         
         all_results[f'iteration_{iteration}'] = {
             'fold_results': iteration_results,
@@ -746,6 +752,7 @@ def main():
             model_name = {'lightgbm': 'LIGHTGBM', 'ebm_primary': 'EBM PRIMARY', 'ebm_distilled': 'EBM DISTILLED'}[model]
             ls = metrics['trading_longshort']
             lo = metrics['trading_longonly']
+            so = metrics['trading_shortonly']
             print(f"  {model_name}:")
             print(f"    Accuracy:           {metrics['accuracy']:.3f}")
             print(f"    ROC-AUC:            {metrics['roc_auc']:.3f}")
@@ -753,6 +760,7 @@ def main():
             print(f"    Brier Score:        {metrics['brier_score']:.4f}")
             print(f"    [Long-Short] Return:{ls['total_return']:>8.2%}  Sharpe:{ls['sharpe']:>5.2f}  MaxDD:{ls['max_drawdown']:>7.2%}")
             print(f"    [Long-Only]  Return:{lo['total_return']:>8.2%}  Sharpe:{lo['sharpe']:>5.2f}  MaxDD:{lo['max_drawdown']:>7.2%}")
+            print(f"    [Short-Only] Return:{so['total_return']:>8.2%}  Sharpe:{so['sharpe']:>5.2f}  MaxDD:{so['max_drawdown']:>7.2%}")
     
     logger.info(f"\n{'=' * 80}")
     logger.info("QUARTERLY ROLLING OOS EVALUATION COMPLETE")
