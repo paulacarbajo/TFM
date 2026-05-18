@@ -125,7 +125,7 @@ python scripts/run_shap_analysis.py
 
 ### Step 7 — RuleFit Distillation (Interpretable Rules, Iteration 1)
 
-Extracts human-readable if-then trading rules from the EBM distilled model via RuleFit. Evaluates on OOS 2020-2024.
+Extracts human-readable if-then trading rules directly from LightGBM soft labels via RuleFit. Evaluates on OOS 2020-2024.
 
 ```bash
 python scripts/run_rulefit_distillation.py
@@ -135,7 +135,7 @@ Output: `data/processed/rulefit_distillation_results.pkl`
 
 ### Step 8 — RuleFit Regime (Interpretable Rules, Iteration 2)
 
-Full Iter2 distillation chain: LightGBM Regime → EBM Distilled → RuleFit with 13 features (10 technical + 3 regime, human-readable names).
+Extracts human-readable if-then trading rules directly from LightGBM Regime soft labels via RuleFit with 13 features (10 technical + 3 regime, human-readable names).
 
 ```bash
 python scripts/run_rulefit_regime.py
@@ -176,8 +176,8 @@ Output: `data/processed/rulefit_regime_results.pkl`
 | EBM Primary + Regime (Iter2) | 0.499 | 0.539 | +0.63 |
 | EBM Distilled (T=2, Iter1) | 0.492 | 0.482 | −0.28 |
 | EBM Distilled + Regime (Iter2) | 0.489 | 0.485 | −0.20 |
-| RuleFit Distillation | ~0.494 | — | ~+0.33 |
-| RuleFit Regime | ~0.499 | — | ~−0.03 |
+| RuleFit Distillation | 0.521 | 0.542 | +0.56 |
+| RuleFit Regime | 0.501 | 0.528 | +0.17 |
 
 > Per-fold bootstrap 95% CI on AUC is ±0.13 — all model differences are within noise.
 

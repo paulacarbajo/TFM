@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-RuleFit Regime — Interpretable Rules from Regime-Aware LightGBM (2-stage distillation)
+RuleFit Regime — Interpretable Rules from Regime-Aware LightGBM (Iteration 2)
 
-Implements the full Iter2 distillation chain:
-    LightGBM Regime (teacher, 14 features)
-        → EBM Distilled Regime (student, 14 features, trained inline)
-        → RuleFit (trained on EBM Distilled soft labels → explicit if-then rules)
+Implements the final step of the Iter2 distillation chain:
+    LightGBM Regime (teacher, 13 features)
+        → RuleFit (trained on LightGBM soft labels → explicit if-then rules)
 
-This mirrors the Iter1 chain (LightGBM → EBM Distilled → RuleFit) but with
-14 features (10 technical + 4 regime) instead of 10 technical features.
+This mirrors the Iter1 chain (LightGBM → RuleFit) but with
+13 features (10 technical + 3 regime) instead of 10 technical features.
 
-Features used (14):
+Features used (13):
     10 technical: ret_5d, ret_21d, vol_rel, rsi_14, macd_line, macd_signal,
                   bb_pct, bb_width, atr_14, volume_direction
-    4 regime (GMM, human-readable labels):
-        regime        → regime_state  (0=Bull, 1=Neutral, 2=Bear)
+    3 regime (GMM, human-readable labels):
+        regime        → regime_state  (0=Bull, 1=Bear)
         prob_bull     → regime_prob_0 (probability of Bull regime)
-        prob_neutral  → regime_prob_1 (probability of Neutral regime)
-        prob_bear     → regime_prob_2 (probability of Bear regime)
+        prob_bear     → regime_prob_1 (probability of Bear regime)
 
 Training data: IS last 2 folds (2015-2019).
 Evaluation: full OOS period 2020-2024.
 
 Usage:
-    python run_rulefit_regime.py
+    python scripts/run_rulefit_regime.py
 """
 
 import argparse
@@ -36,7 +34,6 @@ from loguru import logger
 import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, roc_auc_score, f1_score, brier_score_loss
-from interpret.glassbox import ExplainableBoostingClassifier
 
 from src.ingestion.loader import DataLoader
 from src.models.train import ModelTrainer
@@ -93,7 +90,7 @@ def main():
     logger.info("=" * 80)
     logger.info("RULEFIT REGIME: INTERPRETABLE RULES FROM REGIME-AWARE LIGHTGBM")
     logger.info("=" * 80)
-    logger.info("Chain: LightGBM Regime (14 features) → EBM Distilled Regime → RuleFit")
+    logger.info("Chain: LightGBM Regime (13 features) → RuleFit (soft labels directly)")
     logger.info(f"Config: {args.config}  (suffix: '{suffix}')")
     logger.info(REGIME_LEGEND)
     logger.info("=" * 80)
@@ -166,52 +163,24 @@ def main():
     logger.info(f"Training samples: {len(X_train)}  (limit: 800 — {'will subsample' if len(X_train) > 800 else 'OK'})")
 
     # ------------------------------------------------------------------
-    # Step 4a: Train EBM Distilled Regime (LightGBM → EBM, T=1)
+    # Step 4: Generate soft labels from LightGBM Regime directly
     # ------------------------------------------------------------------
-    logger.info("\nStep 4a: Training EBM Distilled Regime (LightGBM Regime → EBM Distilled)...")
+    logger.info("\nGenerating soft labels from LightGBM Regime...")
 
-    lgbm_proba = lgbm_model.predict_proba(X_train)[:, 1]
-    p = np.clip(lgbm_proba, 1e-8, 1 - 1e-8)
-    # T=1: no temperature scaling — same as run_rolling_oos_evaluation.py with best_T=1
-    soft_lgbm = p
-
-    y_hard_lgbm = (soft_lgbm >= 0.5).astype(int)
-    sw_lgbm = np.abs(soft_lgbm - 0.5) * 2
-
-    ebm_config = config.get('models', {}).get('ebm', {})
-    ebm_dist_model = ExplainableBoostingClassifier(
-        max_bins=ebm_config.get('max_bins', 128),
-        max_interaction_bins=ebm_config.get('max_interaction_bins', 32),
-        interactions=ebm_config.get('interactions', 10),
-        learning_rate=ebm_config.get('learning_rate', 0.01),
-        max_rounds=ebm_config.get('max_rounds', 5000),
-        min_samples_leaf=ebm_config.get('min_samples_leaf', 10),
-        random_state=ebm_config.get('random_state', 42)
-    )
-    ebm_dist_model.fit(X_train, y_hard_lgbm, sample_weight=sw_lgbm)
-    logger.success("EBM Distilled Regime trained.")
-
-    # ------------------------------------------------------------------
-    # Step 4b: Generate soft labels from EBM Distilled Regime
-    # ------------------------------------------------------------------
-    logger.info("\nStep 4b: Generating soft labels from EBM Distilled Regime...")
-
-    ebm_proba = ebm_dist_model.predict_proba(X_train)[:, 1]
-    p = np.clip(ebm_proba, 1e-8, 1 - 1e-8)
-    soft_pos = p  # T=1
+    soft_pos = lgbm_model.predict_proba(X_train)[:, 1]
 
     y_hard = (soft_pos >= 0.5).astype(int)
     sample_weight = np.abs(soft_pos - 0.5) * 2
 
     n_pos = y_hard.sum()
     n_neg = len(y_hard) - n_pos
-    logger.info(f"EBM soft labels: min={soft_pos.min():.3f}  max={soft_pos.max():.3f}  mean={soft_pos.mean():.3f}")
+    logger.info(f"Soft labels: min={soft_pos.min():.3f}  max={soft_pos.max():.3f}  mean={soft_pos.mean():.3f}")
     logger.info(f"Hard labels: {n_pos} positive ({n_pos/len(y_hard)*100:.1f}%), {n_neg} negative")
 
     # ------------------------------------------------------------------
     # Step 5: Train RuleFit with readable feature names
     # ------------------------------------------------------------------
-    logger.info("\nTraining RuleFit on EBM Distilled Regime soft labels...")
+    logger.info("\nTraining RuleFit on LightGBM Regime soft labels...")
 
     trainer = ModelTrainer(config)
     X_train_df = pd.DataFrame(X_train, columns=feature_names)  # use readable names

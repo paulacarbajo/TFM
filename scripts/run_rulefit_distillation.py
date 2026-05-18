@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-RuleFit Distillation — Interpretable Rules from EBM Distilled
+RuleFit Distillation — Interpretable Rules from LightGBM (Iteration 1)
 
-Implements the final step of the two-stage distillation chain:
+Implements the final step of the distillation chain:
     LightGBM (teacher)
-        → EBM Distilled (student, trained on LightGBM soft labels)
-            → RuleFit (trained on EBM Distilled soft labels → explicit if-then rules)
+        → RuleFit (trained on LightGBM soft labels → explicit if-then rules)
 
-RuleFit converts the soft knowledge captured by EBM Distilled into human-readable
-trading rules of the form:
+RuleFit converts the soft knowledge of LightGBM into human-readable trading rules:
     IF rsi_14 > 68.5 AND vol_rel < 1.05  →  LONG  (coef=+0.31, support=18%)
     IF macd_line < -0.08 AND bb_pct < 0.21  →  SHORT  (coef=-0.22, support=12%)
 
@@ -16,7 +14,7 @@ Training data: IS last fold (e.g. 2016-2019 for 2008 baseline).
 Evaluation: full OOS period 2020-2024.
 
 Usage:
-    python run_rulefit_distillation.py
+    python scripts/run_rulefit_distillation.py
 """
 
 import argparse
@@ -75,9 +73,9 @@ def main():
     )
 
     logger.info("=" * 80)
-    logger.info("RULEFIT DISTILLATION: INTERPRETABLE RULES FROM EBM DISTILLED")
+    logger.info("RULEFIT DISTILLATION: INTERPRETABLE RULES FROM LIGHTGBM")
     logger.info("=" * 80)
-    logger.info("Chain: LightGBM → EBM Distilled → RuleFit")
+    logger.info("Chain: LightGBM → RuleFit (soft labels directly)")
     logger.info(f"Config: {args.config}  (suffix: '{suffix}')")
     logger.info("=" * 80)
 
@@ -85,27 +83,25 @@ def main():
         config = yaml.safe_load(f)
 
     # ------------------------------------------------------------------
-    # Step 1: Load distillation PKL — get last IS fold's EBM Distilled
+    # Step 1: Load walk-forward PKL — get last IS fold's LightGBM
     # ------------------------------------------------------------------
-    distill_path = Path(f'data/processed/walk_forward_distillation_results{suffix}.pkl')
-    if not distill_path.exists():
+    wf_path = Path(f'data/processed/walk_forward_results{suffix}.pkl')
+    if not wf_path.exists():
         raise FileNotFoundError(
-            f"Distillation results not found: {distill_path}\n"
-            "Run run_walk_forward_distillation.py first."
+            f"Walk-forward results not found: {wf_path}\n"
+            "Run scripts/run_walk_forward.py first."
         )
 
-    with open(distill_path, 'rb') as f:
-        distill = pickle.load(f)
+    with open(wf_path, 'rb') as f:
+        wf_data = pickle.load(f)
 
-    best_T = distill['best_T']
-    last_fold = distill['all_fold_results'][-1]
-    ebm_distilled = last_fold['ebm_distilled_models'][best_T]
+    last_fold = wf_data['all_fold_results'][-1]
+    lgbm_model = last_fold['models']['lightgbm']
     train_start = last_fold['train_start']
     train_end = last_fold['train_end']
     feature_names = last_fold['feature_names']
     fold_number = last_fold['fold_number']
 
-    logger.info(f"Best temperature: T={best_T}")
     logger.info(f"IS last fold: {fold_number}  ({train_start.date()} → {train_end.date()})")
     logger.info(f"Features ({len(feature_names)}): {feature_names}")
 
@@ -140,16 +136,11 @@ def main():
     logger.info(f"Training samples: {len(X_train)}  (limit: 800 — {'will subsample' if len(X_train) > 800 else 'OK'})")
 
     # ------------------------------------------------------------------
-    # Step 3: Generate soft labels from EBM Distilled
+    # Step 3: Generate soft labels from LightGBM directly
     # ------------------------------------------------------------------
-    logger.info("\nGenerating soft labels from EBM Distilled...")
+    logger.info("\nGenerating soft labels from LightGBM...")
 
-    ebm_proba = ebm_distilled.predict_proba(X_train)[:, 1]
-
-    # Temperature scaling on EBM Distilled probabilities
-    p = np.clip(ebm_proba, 1e-8, 1 - 1e-8)
-    logits = np.log(p / (1 - p))
-    soft_pos = 1 / (1 + np.exp(-logits / best_T))
+    soft_pos = lgbm_model.predict_proba(X_train)[:, 1]
 
     y_hard = (soft_pos >= 0.5).astype(int)
     sample_weight = np.abs(soft_pos - 0.5) * 2  # confidence: 0=uncertain, 1=certain
@@ -163,7 +154,7 @@ def main():
     # ------------------------------------------------------------------
     # Step 4: Train RuleFit
     # ------------------------------------------------------------------
-    logger.info("\nTraining RuleFit on EBM Distilled soft labels...")
+    logger.info("\nTraining RuleFit on LightGBM soft labels...")
 
     trainer = ModelTrainer(config)
     X_train_df = pd.DataFrame(X_train, columns=feature_names)
@@ -274,7 +265,6 @@ def main():
     # Step 7: Save results
     # ------------------------------------------------------------------
     output = {
-        'best_T': best_T,
         'train_start': train_start,
         'train_end': train_end,
         'feature_names': feature_names,
