@@ -1,6 +1,6 @@
 # Market Regime Detection and Knowledge Distillation for Financial Time Series
 
-Master's thesis implementing supervised ML for binary classification of SPY ETF daily returns. Uses Triple Barrier labeling, walk-forward cross-validation, GMM-based market regime detection, knowledge distillation (LightGBM → EBM Primary → EBM Distilled → RuleFit), and SHAP interpretability.
+Master's thesis implementing supervised ML for binary classification of SPY ETF daily returns. Uses Triple Barrier labeling, walk-forward cross-validation, GMM-based market regime detection, knowledge distillation (LightGBM teacher → EBM Primary, EBM Distilled, and RuleFit as independent branches), and SHAP interpretability.
 
 ## Repository Structure
 
@@ -34,7 +34,7 @@ Master's thesis implementing supervised ML for binary classification of SPY ETF 
 │   ├── run_walk_forward_regime.py       # Step 4: IS walk-forward + GMM regime (Iteration 2)
 │   ├── run_rolling_oos_evaluation.py    # Step 5: rolling quarterly OOS (2020-2024)
 │   ├── run_shap_analysis.py             # Step 6: SHAP feature importance (Iter1 + Iter2)
-│   ├── run_rulefit_distillation.py      # Step 7: RuleFit from EBM distilled (Iter1 rules)
+│   ├── run_rulefit_distillation.py      # Step 7: RuleFit from LightGBM soft labels (Iter1 rules)
 │   └── run_rulefit_regime.py            # Step 8: RuleFit from regime LightGBM (Iter2 rules)
 ├── TFM_Notebook.ipynb               # Results notebook: IS/OOS tables, equity curves, SHAP
 ├── requirements.txt
@@ -190,6 +190,7 @@ Output: `data/processed/rulefit_regime_results.pkl`
 6. Top SHAP drivers of SHORT predictions: `vol_rel` (relative volatility) and `rsi_14` (overbought momentum)
 7. Temperature scaling (T∈{1,2,3,4}) and confidence threshold filtering both have negligible effect on EBM Distilled (AUC/Brier range <0.001)
 8. Sensitivity analysis (train_start=2010) produces identical OOS results — last IS fold trains on the same 2016-2019 window regardless of start date; the 2010 config was removed from the repo
+9. Short-Only Sharpe is negative for all models (range −0.15 to −1.00) — expected in a 2020–2024 bull market; the clear Long-Only vs Short-Only gap confirms a long bias consistent with the 55.7% positive label proportion
 
 ## Data Sources
 
