@@ -1,0 +1,2 @@
+# Force LF line endings for Jupyter notebooks to avoid CRLF/LF churn on Windows
+*.ipynb text eol=lf
