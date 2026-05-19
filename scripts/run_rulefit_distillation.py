@@ -59,7 +59,7 @@ def calculate_trading_metrics(predictions: np.ndarray, returns: np.ndarray, stra
 
 
 def main():
-    parser = argparse.ArgumentParser(description='RuleFit distillation from EBM Distilled soft labels')
+    parser = argparse.ArgumentParser(description='RuleFit distillation from LightGBM soft labels')
     parser.add_argument('--config', default='config/config.yaml',
                         help='Path to config YAML (default: config/config.yaml)')
     args = parser.parse_args()
