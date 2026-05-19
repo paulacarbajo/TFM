@@ -16,7 +16,7 @@ Trains exclusively on SPY (S&P 500 ETF) using 10 stationary technical features.
 Both long-short (primary) and long-only (secondary) strategies are evaluated.
 
 Iteration 1: 10 pure technical features (baseline)
-Iteration 2: 10 technical + 4 regime features (GMM regime detection)
+Iteration 2: 10 technical + 3 regime features (GMM regime detection)
 """
 
 import argparse
@@ -655,7 +655,7 @@ def main():
 
     for iteration in [1, 2]:
         logger.info(f"\n{'=' * 80}")
-        logger.info(f"ITERATION {iteration}: {'BASELINE (10 stationary technical features)' if iteration == 1 else 'WITH REGIME FEATURES (10 technical + 4 regime)'}")
+        logger.info(f"ITERATION {iteration}: {'BASELINE (10 stationary technical features)' if iteration == 1 else 'WITH REGIME FEATURES (10 technical + 3 regime)'}")
         logger.info(f"{'=' * 80}")
 
         is_models_iter = is_models_per_iter[iteration]
@@ -740,7 +740,7 @@ def main():
     print("=" * 80)
     
     for iteration in [1, 2]:
-        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE (10 features)' if iteration == 1 else 'WITH REGIME (10 + 4 features)'}")
+        print(f"\n{'ITERATION ' + str(iteration)}: {'BASELINE (10 features)' if iteration == 1 else 'WITH REGIME (10 + 3 features)'}")
         print("-" * 80)
 
         agg = all_results[f'iteration_{iteration}']['aggregated']
